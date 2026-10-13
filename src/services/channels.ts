@@ -106,10 +106,26 @@ export class ChannelService {
 			const file = playlist.shift()!;
 			if (fs.existsSync(file)) {
 				this.lastPlayed.set(channel.name, file);
-				return { path: file, title: path.parse(file).name };
+				return { path: file, title: this.displayTitle(file, channel.dir) };
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * A readable title for Discord. Bare episode filenames like "S01E01" get the
+	 * show's folder name in front: "The Simpsons (1989) - S01E01".
+	 */
+	private displayTitle(file: string, channelDir: string): string {
+		const name = path.parse(file).name;
+		const relDirs = path.relative(channelDir, path.dirname(file)).split(path.sep).filter(Boolean);
+		const isSeasonFolder = (d: string) => /^(season|series|s)\s*\d+$|^specials$|^extras$/i.test(d.trim());
+		const show = [...relDirs].reverse().find(d => !isSeasonFolder(d))
+			|| (relDirs.length === 0 ? '' : path.basename(channelDir));
+		if (!show || name.toLowerCase().includes(show.toLowerCase().replace(/\s*\(\d{4}\)$/, ''))) {
+			return name;
+		}
+		return `${show} - ${name}`;
 	}
 
 	private buildPlaylist(channel: ChannelInfo): string[] {
@@ -132,13 +148,34 @@ export class ChannelService {
 		return files;
 	}
 
-	/** All video files in a folder, including nested subfolders (e.g. Season 1/, Season 2/) */
-	private scanFiles(dir: string): string[] {
+	/**
+	 * All video files in a folder, including nested subfolders (e.g. Season 1/, Season 2/).
+	 * Symlinks are followed, so a channel can be a folder of links to several shows.
+	 */
+	private scanFiles(dir: string, seen: Set<string> = new Set()): string[] {
+		let real: string;
+		try {
+			real = fs.realpathSync(dir);
+		} catch {
+			return []; // broken link
+		}
+		if (seen.has(real)) return []; // link loop or the same show linked twice
+		seen.add(real);
+
 		const out: string[] = [];
 		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 			const full = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				out.push(...this.scanFiles(full));
+			let isDir = entry.isDirectory();
+			if (entry.isSymbolicLink()) {
+				try {
+					isDir = fs.statSync(full).isDirectory();
+				} catch {
+					logger.debug(`Skipping broken link in channel: ${full}`);
+					continue;
+				}
+			}
+			if (isDir) {
+				out.push(...this.scanFiles(full, seen));
 			} else if (VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
 				out.push(full);
 			}
