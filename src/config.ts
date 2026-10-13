@@ -78,6 +78,8 @@ export default {
 
 	// TV channel options
 	channelsDir: process.env.CHANNELS_DIR ? process.env.CHANNELS_DIR : './channels',
+	// Read channels over the network instead (e.g. "http://rclone:8080/misc/StreamBot/channels" from rclone serve webdav)
+	channelsUrl: process.env.CHANNELS_URL ? process.env.CHANNELS_URL.trim() : '',
 	channelShuffle: process.env.CHANNEL_SHUFFLE ? parseBoolean(process.env.CHANNEL_SHUFFLE) : true,
 	channelAutostart: process.env.CHANNEL_AUTOSTART ? process.env.CHANNEL_AUTOSTART.trim() : '',
 

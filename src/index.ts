@@ -55,7 +55,7 @@ if (!fs.existsSync(config.videosDir)) {
 }
 
 // Create the channels dir if it doesn't exist (it may live on a read-only mount, so never crash over it)
-if (!fs.existsSync(config.channelsDir)) {
+if (!config.channelsUrl && !fs.existsSync(config.channelsDir)) {
 	try {
 		fs.mkdirSync(config.channelsDir, { recursive: true });
 	} catch (error: any) {
@@ -101,7 +101,7 @@ async function autostartChannel(): Promise<void> {
 		return;
 	}
 	try {
-		const target = streamingService.getChannelService().findChannel(config.channelAutostart);
+		const target = await streamingService.getChannelService().findChannel(config.channelAutostart);
 		if (!target) {
 			logger.warn(`CHANNEL_AUTOSTART: no channel named "${config.channelAutostart}" in ${config.channelsDir}`);
 			return;

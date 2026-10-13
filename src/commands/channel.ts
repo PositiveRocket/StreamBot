@@ -31,12 +31,17 @@ export default class ChannelCommand extends BaseCommand {
 		}
 
 		let target;
-		if (lower === 'up' || lower === 'next' || lower === '+') {
-			target = channels.neighbour(1);
-		} else if (lower === 'down' || lower === 'prev' || lower === '-') {
-			target = channels.neighbour(-1);
-		} else {
-			target = channels.findChannel(arg);
+		try {
+			if (lower === 'up' || lower === 'next' || lower === '+') {
+				target = await channels.neighbour(1);
+			} else if (lower === 'down' || lower === 'prev' || lower === '-') {
+				target = await channels.neighbour(-1);
+			} else {
+				target = await channels.findChannel(arg);
+			}
+		} catch (error) {
+			await this.sendError(context.message, error instanceof Error ? error.message : String(error));
+			return;
 		}
 
 		if (!target) {
@@ -55,13 +60,20 @@ export default class ChannelCommand extends BaseCommand {
 
 	private async showGuide(context: CommandContext): Promise<void> {
 		const channels = context.streamingService.getChannelService();
-		const list = channels.listChannels();
 		const current = channels.getCurrent();
+		let list;
+		try {
+			list = await channels.listChannels();
+		} catch (error) {
+			await this.sendError(context.message, error instanceof Error ? error.message : String(error));
+			return;
+		}
 
 		if (list.length === 0) {
+			const where = channels.describeSource();
 			await this.sendError(
 				context.message,
-				`No channels set up. Create subfolders in \`${config.channelsDir}\` (e.g. \`${config.channelsDir}/cartoons\`) and put videos in them.`
+				`No channels found in \`${where}\`. Each folder in there is a channel; add a folder (or a link to a show folder) with videos in it.`
 			);
 			return;
 		}

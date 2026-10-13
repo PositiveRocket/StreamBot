@@ -48,9 +48,10 @@ export class StreamingService {
 	 */
 	private async enqueueFromChannel(): Promise<QueueItem | null> {
 		const channel = this.channelService.getCurrent();
-		const file = this.channelService.nextFile();
+		const file = await this.channelService.nextFile();
 		if (!channel || !file) return null;
-		return this.queueService.add(file.path, `[${channel}] ${file.title}`, `📺 ${channel}`, 'local', false, file.path);
+		const type = this.channelService.isRemote() ? 'url' : 'local';
+		return this.queueService.add(file.path, `[${channel}] ${file.title}`, `📺 ${channel}`, type, false, file.path);
 	}
 
 	/**
@@ -430,6 +431,15 @@ export class StreamingService {
 	}
 
 	private async prepareVideoSource(message: Message, videoSource: string, title?: string, headers?: Record<string, string>): Promise<{ inputForFfmpeg: any, tempFilePath: string | null }> {
+		// Channel episodes (local files or files on the network share) go straight to ffmpeg, no yt-dlp lookup
+		if (this.channelService.isChannelLocation(videoSource)) {
+			// Network episodes use ffmpeg's "async:" wrapper. For plain http(s) addresses the streaming
+			// library adds -reconnect_at_eof, which makes ffmpeg retry forever when an .mkv ends,
+			// freezing the channel. Wrapped, the episode ends cleanly and seeking still works.
+			const input = this.channelService.isRemote() ? `async:${videoSource}` : videoSource;
+			return { inputForFfmpeg: input, tempFilePath: null };
+		}
+
 		const mediaSource = await this.mediaService.resolveMediaSource(videoSource, headers);
 
 		if (mediaSource && mediaSource.type === 'youtube' && !mediaSource.isLive) {
