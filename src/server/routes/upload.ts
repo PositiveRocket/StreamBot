@@ -29,7 +29,7 @@ router.post("/api/remote_upload", upload.single("link"), async (req, res) => {
  	try {
  		// First, get the file info to determine size
  		const headResponse = await axios.head(link, { httpsAgent: agent });
- 		const totalSize = parseInt(headResponse.headers['content-length'], 10);
+ 		const totalSize = parseInt(String(headResponse.headers['content-length']), 10);
 
  		// Set up progress tracking
  		let downloaded = 0;
