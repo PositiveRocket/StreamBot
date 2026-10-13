@@ -54,9 +54,13 @@ if (!fs.existsSync(config.videosDir)) {
 	fs.mkdirSync(config.videosDir);
 }
 
-// Create the channels dir if it doesn't exist
+// Create the channels dir if it doesn't exist (it may live on a read-only mount, so never crash over it)
 if (!fs.existsSync(config.channelsDir)) {
-	fs.mkdirSync(config.channelsDir, { recursive: true });
+	try {
+		fs.mkdirSync(config.channelsDir, { recursive: true });
+	} catch (error: any) {
+		logger.warn(`Channels folder ${config.channelsDir} does not exist and could not be created (${error.code}). TV channels will be unavailable until it exists.`);
+	}
 }
 
 // Create previewCache parent dir if it doesn't exist
