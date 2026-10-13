@@ -76,6 +76,11 @@ export default {
 	videosDir: process.env.VIDEOS_DIR ? process.env.VIDEOS_DIR : './videos',
 	previewCacheDir: process.env.PREVIEW_CACHE_DIR ? process.env.PREVIEW_CACHE_DIR : './tmp/preview-cache',
 
+	// TV channel options
+	channelsDir: process.env.CHANNELS_DIR ? process.env.CHANNELS_DIR : './channels',
+	channelShuffle: process.env.CHANNEL_SHUFFLE ? parseBoolean(process.env.CHANNEL_SHUFFLE) : true,
+	channelAutostart: process.env.CHANNEL_AUTOSTART ? process.env.CHANNEL_AUTOSTART.trim() : '',
+
 	// yt-dlp options
 	ytdlpCookiesPath: process.env.YTDLP_COOKIES_PATH ? process.env.YTDLP_COOKIES_PATH : '',
 

@@ -4,6 +4,7 @@ import fs from 'fs';
 import config from "../config.js";
 import { MediaService } from './media.js';
 import { QueueService } from './queue.js';
+import { ChannelService } from './channels.js';
 import { getVideoParams } from "../utils/ffmpeg.js";
 import logger from '../utils/logger.js';
 import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
@@ -17,6 +18,10 @@ export class StreamingService {
  	private streamStatus: StreamStatus;
  	private failedVideos: Set<string> = new Set();
  	private isSkipping: boolean = false;
+ 	private channelService: ChannelService = new ChannelService();
+ 	private currentPlayback: Promise<void> | null = null;
+ 	private channelFailures: number = 0;
+ 	private advanceTimer: ReturnType<typeof setTimeout> | null = null;
 
  	constructor(client: Client, streamStatus: StreamStatus) {
  		this.streamer = new Streamer(client);
@@ -31,6 +36,82 @@ export class StreamingService {
 
 	public getQueueService(): QueueService {
 		return this.queueService;
+	}
+
+	public getChannelService(): ChannelService {
+		return this.channelService;
+	}
+
+	/**
+	 * Put the next file from the tuned-in channel on the end of the queue.
+	 * Returns the queued item, or null if channel mode is off or the channel is empty.
+	 */
+	private async enqueueFromChannel(): Promise<QueueItem | null> {
+		const channel = this.channelService.getCurrent();
+		const file = this.channelService.nextFile();
+		if (!channel || !file) return null;
+		return this.queueService.add(file.path, `[${channel}] ${file.title}`, `📺 ${channel}`, 'local', false, file.path);
+	}
+
+	/**
+	 * Switch to a channel. Whatever is playing is cut off immediately and the
+	 * queue is cleared, like flipping the channel on a TV.
+	 */
+	public async tuneChannel(message: Message, channelName: string): Promise<boolean> {
+		this.channelService.tune(channelName);
+		this.channelFailures = 0;
+		this.cancelPendingAdvance();
+
+		const wasPlaying = this.streamStatus.playing;
+		if (wasPlaying) this.streamStatus.manualStop = true;
+
+		this.queueService.clearQueue();
+		const item = await this.enqueueFromChannel();
+		if (!item) {
+			this.channelService.off();
+			await DiscordUtils.sendError(message, `Channel \`${channelName}\` has no videos in it.`);
+			if (wasPlaying) {
+				this.controller?.abort();
+				this.streamer.stopStream();
+			}
+			return false;
+		}
+
+		if (wasPlaying) {
+			// Stop the current video and wait for it to wind down before starting the new one
+			this.controller?.abort();
+			this.streamer.stopStream();
+			if (this.currentPlayback) {
+				await Promise.race([
+					this.currentPlayback.catch(() => {}),
+					new Promise(resolve => setTimeout(resolve, 5000))
+				]);
+			}
+		}
+
+		this.streamStatus.manualStop = false;
+		const next = this.queueService.getNext();
+		if (!next) return false;
+		this.queueService.setPlaying(true);
+		// Don't block the command on the whole video playing
+		this.playVideoFromQueueItem(message, next).catch(err =>
+			ErrorUtils.handleError(err, 'starting channel playback')
+		);
+		return true;
+	}
+
+	private cancelPendingAdvance(): void {
+		if (this.advanceTimer) {
+			clearTimeout(this.advanceTimer);
+			this.advanceTimer = null;
+		}
+	}
+
+	/** Leave channel mode. The current video keeps playing; the bot stops after the queue empties. */
+	public channelOff(): string | null {
+		const was = this.channelService.getCurrent();
+		this.channelService.off();
+		return was;
 	}
 
 	private markVideoAsFailed(videoSource: string): void {
@@ -114,7 +195,11 @@ export class StreamingService {
 			this.streamer.stopStream();
 
 			const currentItem = this.queueService.getCurrent(); // Get item being skipped
-			const nextItem = this.queueService.skip(); // Advance the queue
+			let nextItem = this.queueService.skip(); // Advance the queue
+			if (!nextItem && this.channelService.isActive()) {
+				await this.enqueueFromChannel();
+				nextItem = this.queueService.getNext();
+			}
 
 			if (!nextItem) {
 				// No more items in queue - stop playback and leave voice channel
@@ -280,7 +365,9 @@ export class StreamingService {
 	}
 
 	private async handleQueueAdvancement(message: Message): Promise<void> {
-		await DiscordUtils.sendFinishMessage(message);
+		if (!this.channelService.isActive()) {
+			await DiscordUtils.sendFinishMessage(message);
+		}
 
 		// The video finished playing, so remove it from the queue
 		const finishedItem = this.queueService.getCurrent();
@@ -288,13 +375,19 @@ export class StreamingService {
 			this.queueService.removeFromQueue(finishedItem.id);
 		}
 
-		// Get the next item in the queue.
-		const nextItem = this.queueService.getNext();
+		// Get the next item in the queue. Anything people queued with play goes first,
+		// then the channel (if one is tuned in) fills the gap.
+		let nextItem = this.queueService.getNext();
+		if (!nextItem && this.channelService.isActive()) {
+			await this.enqueueFromChannel();
+			nextItem = this.queueService.getNext();
+		}
 
 		if (nextItem) {
 			logger.info(`Auto-playing next item from queue: ${nextItem.title}`);
-			setTimeout(() => {
-				this.playVideoFromQueueItem(message, nextItem).catch(err =>
+			this.advanceTimer = setTimeout(() => {
+				this.advanceTimer = null;
+				this.playVideoFromQueueItem(message, nextItem!).catch(err =>
 					ErrorUtils.handleError(err, 'auto-playing next item')
 				);
 			}, 1000);
@@ -357,9 +450,22 @@ export class StreamingService {
 	}
 
 	private async finalizeStream(message: Message, tempFile: string | null): Promise<void> {
-		if (!this.streamStatus.manualStop && this.controller && !this.controller.signal.aborted) {
+		const finishedNormally = !this.streamStatus.manualStop && this.controller && !this.controller.signal.aborted;
+		if (finishedNormally) {
+			this.channelFailures = 0;
+			await this.handleQueueAdvancement(message);
+		} else if (!this.streamStatus.manualStop && this.channelService.isActive() && ++this.channelFailures < 5) {
+			// A file failed to play while a channel is on: move on to the next one instead of going dark
+			logger.warn(`Channel playback failed (${this.channelFailures} in a row), moving on`);
 			await this.handleQueueAdvancement(message);
 		} else {
+			if (this.channelService.isActive() && !this.streamStatus.manualStop) {
+				const name = this.channelFailures >= 5 ? this.channelOff() : null;
+				if (name) {
+					await DiscordUtils.sendError(message, `Channel \`${name}\` turned off after 5 videos in a row failed to play.`).catch(() => {});
+				}
+			}
+			this.channelFailures = 0;
 			this.queueService.setPlaying(false);
 			this.queueService.resetCurrentIndex();
 			await this.cleanupStreamStatus();
@@ -374,7 +480,13 @@ export class StreamingService {
 		}
 	}
 
-	public async playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>): Promise<void> {
+	public playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>): Promise<void> {
+		const playback = this.playVideoInner(message, videoSource, title, videoParams, headers);
+		this.currentPlayback = playback;
+		return playback;
+	}
+
+	private async playVideoInner(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>): Promise<void> {
 		const [guildId, channelId] = [config.guildId, config.videoChannelId];
 		this.streamStatus.manualStop = false;
 
@@ -434,6 +546,10 @@ export class StreamingService {
 	}
 
 	public async stopAndClearQueue(): Promise<void> {
+		this.channelService.off();
+		this.channelFailures = 0;
+		this.cancelPendingAdvance();
+
 		// Clear the queue
 		this.queueService.clearQueue();
 		logger.info("Queue cleared by stop command");

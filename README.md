@@ -192,6 +192,30 @@ docker compose -f docker-compose-warp.yml up -d
 | `queue` | Display the current video queue | |
 | `list` | Show available local videos | |
 
+### 📡 TV Channel Commands
+
+A channel is a folder of videos that plays on a loop, like a TV channel. Every subfolder of `CHANNELS_DIR` is a channel:
+
+```
+channels/
+├── cartoons/      ← $ch cartoons
+│   ├── Season 1/
+│   └── Season 2/
+├── movies/        ← $ch movies   (or a symlink to a folder elsewhere)
+└── music-videos/
+```
+
+Videos are shuffled with no repeats until the whole folder has played (set `CHANNEL_SHUFFLE="false"` to play in filename order). New files are picked up automatically. Anything queued with `play` runs between episodes, then the channel resumes. `skip` jumps to the next episode.
+
+| Command | Description | Aliases |
+|---------|-------------|---------|
+| `channel` | Show the channel guide | `ch`, `tv` |
+| `channel <name\|number>` | Switch to a channel right away | |
+| `channel up` / `channel down` | Flip to the next/previous channel | |
+| `channel off` | Stop the channel after the current video | |
+
+Set `CHANNEL_AUTOSTART="cartoons"` (with `COMMAND_CHANNEL_ID` set) to have the bot tune in on its own every time it starts.
+
 ### 🔧 Utility Commands
 
 | Command | Description | Aliases |

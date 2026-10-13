@@ -54,6 +54,11 @@ if (!fs.existsSync(config.videosDir)) {
 	fs.mkdirSync(config.videosDir);
 }
 
+// Create the channels dir if it doesn't exist
+if (!fs.existsSync(config.channelsDir)) {
+	fs.mkdirSync(config.channelsDir, { recursive: true });
+}
+
 // Create previewCache parent dir if it doesn't exist
 if (!fs.existsSync(path.dirname(config.previewCacheDir))) {
 	fs.mkdirSync(path.dirname(config.previewCacheDir), { recursive: true });
@@ -81,7 +86,29 @@ if (videos.length > 0) {
 // Event handlers
 client.on("ready", async () => {
 	await handleReady(client);
+	await autostartChannel();
 });
+
+// Start a TV channel on boot if CHANNEL_AUTOSTART is set
+async function autostartChannel(): Promise<void> {
+	if (!config.channelAutostart) return;
+	if (!config.cmdChannelId) {
+		logger.warn('CHANNEL_AUTOSTART is set but COMMAND_CHANNEL_ID is empty, so there is nowhere to post updates. Skipping autostart.');
+		return;
+	}
+	try {
+		const target = streamingService.getChannelService().findChannel(config.channelAutostart);
+		if (!target) {
+			logger.warn(`CHANNEL_AUTOSTART: no channel named "${config.channelAutostart}" in ${config.channelsDir}`);
+			return;
+		}
+		const textChannel: any = await client.channels.fetch(config.cmdChannelId);
+		const anchor = await textChannel.send(`📺 **Now tuned to**: \`${target.name}\` (auto-started)`);
+		await streamingService.tuneChannel(anchor, target.name);
+	} catch (error) {
+		logger.error('Failed to autostart channel:', error);
+	}
+}
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
 	await handleVoiceStateUpdate(oldState, newState, streamStatus, client);
