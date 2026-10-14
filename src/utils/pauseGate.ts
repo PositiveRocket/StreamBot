@@ -21,9 +21,23 @@ const STALL_AFTER_MS = 500;        // no new frame for this long = stalled
 const KEEPALIVE_EVERY_MS = 200;    // resend the held picture 5 times a second
 const GIVE_UP_STALL_MS = 120_000;  // a source dead this long (and not paused) is left to fail normally
 
+const RECOVER_AFTER_MS = 15_000;   // stalled this long (not paused) = ask the bot to reopen the video
+
 let closed = false;
 let waiters: (() => void)[] = [];
 let currentVideo: any = null;
+let stallHandler: (() => void) | null = null;
+
+/** Called once per stall when the source has delivered nothing for RECOVER_AFTER_MS */
+export function onLongStall(handler: () => void): void {
+	stallHandler = handler;
+}
+
+/** Seconds into the current video of the last frame actually sent (relative to where ffmpeg started) */
+export function lastSentPosition(): number | null {
+	const pts = currentVideo?.__lastPts;
+	return typeof pts === 'number' && isFinite(pts) ? pts / 1000 : null;
+}
 
 export const PauseGate = {
 	get paused(): boolean {
@@ -52,10 +66,14 @@ function stopWatchdog(stream: any): void {
 	if (currentVideo === stream) currentVideo = null;
 }
 
-/** Resend the last keyframe whenever the video stream goes quiet */
-function ensureWatchdog(stream: any): void {
-	if (stream.__watchdog) return;
-	if (currentVideo && currentVideo !== stream) stopWatchdog(currentVideo); // only the newest stream
+/**
+ * Start the keep-alive for a video stream on its FIRST frame. The newest stream always wins;
+ * an older stream that is still draining after being replaced never takes over again.
+ */
+function startWatchdog(stream: any): void {
+	if (stream.__seen) return;
+	stream.__seen = true;
+	if (currentVideo && currentVideo !== stream) stopWatchdog(currentVideo);
 	currentVideo = stream;
 	stream.__lastSent = Date.now();
 	const stop = () => stopWatchdog(stream);
@@ -74,7 +92,12 @@ function ensureWatchdog(stream: any): void {
 		if (!stream.__stalledSince) {
 			stream.__stalledSince = stream.__lastSent;
 			stream.__stallWasPause = closed;
+			stream.__stallReported = false;
 			if (!closed) logger.warn('Video stalled (waiting on the source), holding the last picture so Discord keeps the stream');
+		}
+		if (!closed && !stream.__stallReported && idle > RECOVER_AFTER_MS && stallHandler) {
+			stream.__stallReported = true;
+			try { stallHandler(); } catch (error) { logger.error('Stall recovery failed:', error); }
 		}
 		try {
 			Promise.resolve(stream._sendFrame(stream.__lastKey, stream.__frametime || 33)).catch(() => stop());
@@ -98,7 +121,7 @@ export async function installPauseGate(): Promise<void> {
 		proto._write = async function (this: any, frame: any, encoding: any, callback: any) {
 			const isVideo = this.constructor?.name === 'VideoStream';
 			if (isVideo && frame?.data) {
-				ensureWatchdog(this);
+				startWatchdog(this);
 				// Remember the latest complete picture, for keep-alive resends
 				if (Number(frame.flags ?? 0) & AV_PKT_FLAG_KEY) {
 					this.__lastKey = Buffer.from(frame.data);
@@ -114,9 +137,11 @@ export async function installPauseGate(): Promise<void> {
 				this.resetTimingCompensation();
 			}
 
+			const pts = frame?.timeBase ? (Number(frame.pts) / frame.timeBase.den) * frame.timeBase.num * 1000 : NaN;
 			const done = (err?: any) => {
 				if (isVideo) {
 					this.__lastSent = Date.now();
+					if (isFinite(pts)) this.__lastPts = pts;
 					if (this.__stalledSince) {
 						const secs = ((Date.now() - this.__stalledSince) / 1000).toFixed(1);
 						if (!this.__stallWasPause) logger.info(`Video resumed after a ${secs}s stall`);

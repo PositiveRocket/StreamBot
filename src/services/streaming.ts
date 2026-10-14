@@ -10,9 +10,11 @@ import { getVideoParams } from "../utils/ffmpeg.js";
 import logger from '../utils/logger.js';
 import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
 import { QueueItem, StreamStatus } from '../types/index.js';
-import { PauseGate } from '../utils/pauseGate.js';
+import { PauseGate, onLongStall, lastSentPosition } from '../utils/pauseGate.js';
 
 interface ResumeInfo {
+	/** 'recover' = reopening after the source stalled */
+	reason?: 'resume' | 'recover';
 	position: number;
 	input: string;
 	tempFile: string | null;
@@ -54,7 +56,10 @@ export class StreamingService {
  	private streamerRawListeners: ((...args: any[]) => void)[] = [];
  	private needsFreshStreamer: boolean = false;
  	// Pause/resume: what is playing right now, and what is paused (if anything)
- 	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number; duration?: number | null } | null = null;
+ 	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number; duration?: number | null; message: Message; itemId?: string } | null = null;
+ 	private recovering: boolean = false;
+ 	private keepTempFile: string | null = null;
+ 	private recoveries: { itemId: string; count: number } | null = null;
  	private paused: { item: QueueItem; position: number; at: number } | null = null;
  	// Only one playback may run at a time. Each playback gets a number; a playback that has
  	// been replaced is "stale" and must not advance the queue or tear down the newer stream.
@@ -64,6 +69,9 @@ export class StreamingService {
  	constructor(client: Client, streamStatus: StreamStatus) {
  		this.client = client;
  		this.streamer = this.createStreamer();
+ 		onLongStall(() => {
+ 			this.recoverFromStall().catch(err => ErrorUtils.handleError(err, 'recovering from a stall'));
+ 		});
  		this.mediaService = new MediaService();
  		this.queueService = new QueueService();
  		this.streamStatus = streamStatus;
@@ -208,6 +216,45 @@ export class StreamingService {
 			upNext,
 			joined: this.streamStatus.joined,
 		};
+	}
+
+	/**
+	 * The source has delivered nothing for a while (usually the NAS connection died). Reopen the
+	 * same video at the last frame that was shown, which makes a fresh connection. After 3 failed
+	 * attempts on the same video, give up on it and move on.
+	 */
+	private async recoverFromStall(): Promise<void> {
+		if (this.recovering || this.paused) return;
+		const item = this.queueService.getCurrent();
+		const now = this.nowPlaying;
+		if (!item || !now || item.isLive || now.itemId !== item.id) return;
+
+		const sent = lastSentPosition();
+		const position = Math.max(0, now.offset + (sent ?? (Date.now() - now.startedAt) / 1000) - 1);
+		this.recoveries = this.recoveries?.itemId === item.id
+			? { itemId: item.id, count: this.recoveries.count + 1 }
+			: { itemId: item.id, count: 1 };
+
+		this.recovering = true;
+		try {
+			if (this.recoveries.count > 3) {
+				logger.warn(`${item.title} keeps stalling, skipping it`);
+				await DiscordUtils.sendInfo(now.message, 'Skipping', `\`${item.title}\` keeps stalling, moving on.`).catch(() => {});
+				await this.skipCurrent(now.message);
+				return;
+			}
+			logger.warn(`Source stalled, reopening ${item.title} at ${formatTime(position)} (attempt ${this.recoveries.count})`);
+			this.keepTempFile = now.tempFile;
+			await this.stopActivePlayback();   // the stalled playback becomes stale: it won't advance the queue
+			this.keepTempFile = null;
+			this.streamStatus.manualStop = false;
+			this.queueService.setCurrentById(item.id);
+			this.queueService.setPlaying(true);
+			this.playVideoFromQueueItem(now.message, item, { reason: 'recover', position, input: now.input, tempFile: now.tempFile })
+				.catch(err => ErrorUtils.handleError(err, 'reopening after a stall'));
+		} finally {
+			this.recovering = false;
+		}
 	}
 
 	public isPaused(): boolean {
@@ -496,7 +543,14 @@ export class StreamingService {
 	}
 
 	private async executeStream(inputForFfmpeg: any, streamOpts: any, message: Message, title: string, videoSource: string): Promise<void> {
-		const { command, output: ffmpegOutput } = prepareStream(inputForFfmpeg, streamOpts, this.controller!.signal);
+		const signal = this.controller!.signal;
+		const { command, output: ffmpegOutput } = prepareStream(inputForFfmpeg, streamOpts, signal);
+		// The library only sends SIGTERM, which ffmpeg can ignore while it's reconnecting. Then the old
+		// episode keeps decoding in the background. So also end its output and force-kill it shortly after.
+		signal.addEventListener('abort', () => {
+			try { ffmpegOutput.destroy(); } catch {}
+			setTimeout(() => { try { command.kill('SIGKILL'); } catch {} }, 2000);
+		}, { once: true });
 
 		command.on("error", (err, stdout, stderr) => {
 			// Don't log error if it's due to manual stop
@@ -633,7 +687,7 @@ export class StreamingService {
 		if (gen !== this.playbackGen) {
 			// A newer video has taken over: just clean up our own leftovers
 			logger.info('Previous video stopped (replaced by a newer one)');
-			if (tempFile) {
+			if (tempFile && tempFile !== this.keepTempFile) {
 				try { fs.unlinkSync(tempFile); } catch {}
 			}
 			return;
@@ -719,7 +773,9 @@ export class StreamingService {
 			const offset = resume?.position ?? 0;
 
 			await this.ensureVoiceConnection(guildId, channelId, title);
-			if (resume) {
+			if (resume?.reason === 'recover') {
+				await DiscordUtils.sendInfo(message, 'Reconnected', `Picked \`${title || videoSource}\` back up at ${formatTime(offset)}`).catch(() => {});
+			} else if (resume) {
 				await DiscordUtils.sendInfo(message, 'Resumed', `\`${title || videoSource}\` from ${formatTime(offset)}`);
 			} else {
 				await DiscordUtils.sendPlaying(message, title || videoSource);
@@ -729,7 +785,7 @@ export class StreamingService {
 				...(offset > 0 ? [`-ss ${offset.toFixed(1)}`] : []),
 				...(this.channelInputOptions(inputForFfmpeg) || []),
 			];
-			this.nowPlaying = { input: inputForFfmpeg, tempFile, offset, startedAt: Date.now() };
+			this.nowPlaying = { input: inputForFfmpeg, tempFile, offset, startedAt: Date.now(), message, itemId: this.queueService.getCurrent()?.id };
 			const streamOpts = this.setupStreamConfiguration(videoParams, headers, inputOptions);
 			await this.executeStreamWorkflow(inputForFfmpeg, streamOpts, message, title || videoSource, videoSource);
 		} catch (error) {
