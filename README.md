@@ -189,8 +189,7 @@ docker compose -f docker-compose-warp.yml up -d
 | `ytsearch <query>` | Search for videos on YouTube | |
 | `stop` | Stop current video playback and clear queue | `leave`, `s` |
 | `skip` | Skip the currently playing video | `next` |
-| `pause` | Pause what's playing (the bot stays in voice; live streams can't be paused) | |
-| `resume` | Continue a paused video from where it was paused | `unpause`, `continue` |
+| `pause` | Pause what's playing (holds the current frame); use it again to resume. Live streams can't be paused | `unpause`, `resume` |
 | `queue` | Display the current video queue | |
 | `list` | Show available local videos | |
 

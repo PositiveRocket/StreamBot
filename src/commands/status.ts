@@ -39,7 +39,7 @@ export default class StatusCommand extends BaseCommand {
 			lines.push(`⏭️ **Up next**: another ${s.channel} episode`);
 		}
 
-		if (s.paused) lines.push(`Use \`${p}resume\` to continue.`);
+		if (s.paused) lines.push(`Use \`${p}pause\` again to continue.`);
 
 		await context.message.react('📊').catch(() => {});
 		await context.message.channel.send(lines.join('\n'));

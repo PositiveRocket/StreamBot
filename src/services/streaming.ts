@@ -220,7 +220,7 @@ export class StreamingService {
 	 */
 	public async pause(message: Message): Promise<void> {
 		if (this.paused) {
-			await DiscordUtils.sendError(message, `Already paused. Use \`${config.prefix}resume\` to continue.`);
+			await DiscordUtils.sendError(message, `Already paused. Use \`${config.prefix}pause\` again to continue.`);
 			return;
 		}
 		const item = this.queueService.getCurrent();
@@ -238,7 +238,7 @@ export class StreamingService {
 		const position = Math.max(0, now.offset + (Date.now() - now.startedAt) / 1000);
 		this.paused = { item, position, at: Date.now() };
 		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(`⏸ ${item.title}`));
-		await DiscordUtils.sendInfo(message, 'Paused', `\`${item.title}\` at ${formatTime(position)}. Use \`${config.prefix}resume\` to continue.`);
+		await DiscordUtils.sendInfo(message, 'Paused', `\`${item.title}\` at ${formatTime(position)}. Use \`${config.prefix}pause\` again to continue.`);
 	}
 
 	public async resume(message: Message): Promise<void> {
@@ -322,7 +322,7 @@ export class StreamingService {
 		}
 
 		if (this.paused) {
-			await DiscordUtils.sendInfo(message, 'Paused', `Playback is paused. Use \`${config.prefix}resume\` to continue.`);
+			await DiscordUtils.sendInfo(message, 'Paused', `Playback is paused. Use \`${config.prefix}pause\` again to continue.`);
 			return;
 		}
 
