@@ -41,5 +41,14 @@
     "@types/express-session": "^1.18.2",
     "@types/multer": "^2.1.0",
     "typescript": "^5.9.3"
-  }
+  },
+  "trustedDependencies": [
+    "argon2",
+    "bcrypt",
+    "sharp",
+    "zeromq",
+    "node-av",
+    "@seydx/node-av-linux-x64",
+    "@lng2004/node-datachannel"
+  ]
 }
