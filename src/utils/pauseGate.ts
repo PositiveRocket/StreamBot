@@ -20,6 +20,7 @@ const AV_PKT_FLAG_KEY = 1;
 const STALL_AFTER_MS = 500;        // no new frame for this long = stalled
 const KEEPALIVE_EVERY_MS = 200;    // resend the held picture 5 times a second
 const GIVE_UP_STALL_MS = 120_000;  // a source dead this long (and not paused) is left to fail normally
+const BRIDGE_GAP_MS = 20_000;      // after a video ends, keep holding its last picture this long for the next one
 
 const RECOVER_AFTER_MS = 15_000;   // stalled this long (not paused) = ask the bot to reopen the video
 
@@ -77,14 +78,23 @@ function startWatchdog(stream: any): void {
 	currentVideo = stream;
 	stream.__lastSent = Date.now();
 	const stop = () => stopWatchdog(stream);
-	stream.once('finish', stop);
-	stream.once('close', stop);
+	// When this video ends, keep holding its last picture until the next video starts (seamless
+	// episode changes keep the same Go Live open), or until the stream is really stopped.
+	const ended = () => { stream.__endedAt ??= Date.now(); };
+	stream.once('finish', ended);
+	stream.once('close', ended);
 	stream.once('error', stop);
 
 	stream.__watchdog = setInterval(() => {
-		if (currentVideo !== stream || stream.destroyed || stream.writableFinished) return stop();
+		if (currentVideo !== stream) return stop();
+		if (stream.__endedAt && Date.now() - stream.__endedAt > BRIDGE_GAP_MS) return stop();
 		const idle = Date.now() - stream.__lastSent;
 		if (idle < STALL_AFTER_MS || !stream.__lastKey) return;
+		if (stream.__endedAt) {
+			// Between episodes: just hold the picture, this isn't a stall
+			try { Promise.resolve(stream._sendFrame(stream.__lastKey, stream.__frametime || 33)).catch(() => stop()); } catch { stop(); }
+			return;
+		}
 		if (!closed && idle > GIVE_UP_STALL_MS) {
 			logger.warn(`Video source has been stalled for ${Math.round(idle / 1000)}s, no longer keeping the stream alive`);
 			return stop();
@@ -107,6 +117,22 @@ function startWatchdog(stream: any): void {
 	}, KEEPALIVE_EVERY_MS);
 }
 
+/**
+ * Every audio/video stream that has started sending. When a video is stopped or replaced, its
+ * streams are retired: frames still queued in them are dropped instead of sent. With seamless
+ * changes the next video uses the same Go Live, so leftovers would otherwise mix into it.
+ */
+const liveStreams = new Set<any>();
+export function retireStreams(): void {
+	for (const s of liveStreams) s.__retired = true;
+	liveStreams.clear();
+}
+
+/** The stream was really stopped: stop resending pictures into it */
+export function endKeepAlive(): void {
+	if (currentVideo) stopWatchdog(currentVideo);
+}
+
 /** Hook the gate into the library's frame sender. Safe to call more than once. */
 export async function installPauseGate(): Promise<void> {
 	try {
@@ -119,6 +145,11 @@ export async function installPauseGate(): Promise<void> {
 
 		const originalWrite = proto._write;
 		proto._write = async function (this: any, frame: any, encoding: any, callback: any) {
+			if (this.__retired) return callback(); // replaced: drop leftovers
+			if (!this.__registered) {
+				this.__registered = true;
+				liveStreams.add(this);
+			}
 			const isVideo = this.constructor?.name === 'VideoStream';
 			if (isVideo && frame?.data) {
 				startWatchdog(this);
@@ -133,6 +164,7 @@ export async function installPauseGate(): Promise<void> {
 
 			if (closed) {
 				await PauseGate.wait();
+				if (this.__retired) return callback();
 				// Re-anchor timing, otherwise the paused time counts as "behind" and it fast-forwards
 				this.resetTimingCompensation();
 			}

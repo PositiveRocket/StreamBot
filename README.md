@@ -215,6 +215,8 @@ Videos are shuffled with no repeats until the whole folder has played (set `CHAN
 | `channel up` / `channel down` | Flip to the next/previous channel | |
 | `channel off` | Stop the channel after the current video | |
 
+Episode changes, skips and channel flips keep the same screen share open, so viewers don't see the stream stop and restart (set `SEAMLESS_TRANSITIONS="false"` to turn this off).
+
 Set `CHANNEL_AUTOSTART="cartoons"` (with `COMMAND_CHANNEL_ID` set) to have the bot tune in on its own every time it starts.
 
 ### 🔧 Utility Commands

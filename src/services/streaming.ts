@@ -10,7 +10,7 @@ import { getVideoParams } from "../utils/ffmpeg.js";
 import logger from '../utils/logger.js';
 import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
 import { QueueItem, StreamStatus } from '../types/index.js';
-import { PauseGate, onLongStall, lastSentPosition } from '../utils/pauseGate.js';
+import { PauseGate, onLongStall, lastSentPosition, endKeepAlive, retireStreams } from '../utils/pauseGate.js';
 
 interface ResumeInfo {
 	/** 'recover' = reopening after the source stalled */
@@ -59,6 +59,7 @@ export class StreamingService {
  	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number; duration?: number | null; message: Message; itemId?: string } | null = null;
  	private recovering: boolean = false;
  	private keepTempFile: string | null = null;
+ 	private liveConn: any = null;
  	private recoveries: { itemId: string; count: number; stallAt: number; jumps: number; reopenedAt: number } | null = null;
  	private paused: { item: QueueItem; position: number; at: number } | null = null;
  	// Only one playback may run at a time. Each playback gets a number; a playback that has
@@ -85,7 +86,61 @@ export class StreamingService {
 		const before = new Set(this.client.listeners('raw'));
 		const streamer = new Streamer(this.client);
 		this.streamerRawListeners = this.client.listeners('raw').filter(l => !before.has(l)) as any;
+		this.liveConn = null;
+		if (config.seamlessTransitions) this.makeSeamless(streamer);
 		return streamer;
+	}
+
+	/**
+	 * Seamless episode changes. The library ends the Go Live after every video and starts a new
+	 * one for the next, which viewers see as the screen share stopping and restarting. Instead:
+	 * - stopStream() from the library (end of a video, skip, channel change) keeps the Go Live open;
+	 *   it's only really closed by cleanupStreamStatus, when nothing else is going to play.
+	 * - createStream() hands back the open Go Live, and on it, setPacketizer() is not re-run:
+	 *   that would restart the RTP sequence numbers mid-stream and viewers' players would drop
+	 *   the new video. The numbering just carries on into the next episode.
+	 * - "video off" signals between videos are skipped, so viewers aren't told the stream ended.
+	 */
+	private makeSeamless(streamer: Streamer): void {
+		const s: any = streamer;
+		const realStop = streamer.stopStream.bind(streamer);
+		const realCreate = streamer.createStream.bind(streamer);
+		s.realStopStream = () => {
+			endKeepAlive();
+			this.liveConn = null;
+			realStop();
+		};
+		s.stopStream = () => {
+			// keep the Go Live open for the next video
+		};
+		s.createStream = async () => {
+			const open = this.liveConn;
+			if (open && open.ready !== false && !open.mediaConnection?._closed && streamer.voiceConnection?.streamConnection) {
+				logger.info('Continuing on the open stream (seamless change)');
+				return open;
+			}
+			const conn: any = await realCreate();
+			const setPacketizer = conn.setPacketizer.bind(conn);
+			conn.setPacketizer = (codec: string) => {
+				if (conn._videoPacketizer) return; // already set up: keep the RTP numbering going
+				setPacketizer(codec);
+			};
+			const media = conn.mediaConnection;
+			const setVideoAttributes = media.setVideoAttributes.bind(media);
+			media.setVideoAttributes = (enabled: boolean, attr?: any) => {
+				if (!enabled && this.liveConn === conn) return; // between videos: don't announce "video off"
+				setVideoAttributes(enabled, attr);
+			};
+			this.liveConn = conn;
+			return conn;
+		};
+	}
+
+	/** Really end the Go Live (nothing else is going to play) */
+	private stopStreamForReal(): void {
+		const s: any = this.streamer;
+		if (typeof s.realStopStream === 'function') s.realStopStream();
+		else this.streamer.stopStream();
 	}
 
 	/**
@@ -134,8 +189,7 @@ export class StreamingService {
 		this.cancelPendingAdvance();
 		this.clearPaused();
 
-		const wasPlaying = this.streamStatus.playing;
-		if (wasPlaying) this.streamStatus.manualStop = true;
+		const wasPlaying = this.playbackActive || this.streamStatus.playing;
 
 		this.queueService.clearQueue();
 		const item = await this.enqueueFromChannel();
@@ -143,23 +197,14 @@ export class StreamingService {
 			this.channelService.off();
 			await DiscordUtils.sendError(message, `Channel \`${channelName}\` has no videos in it.`);
 			if (wasPlaying) {
-				this.controller?.abort();
-				this.streamer.stopStream();
+				await this.stopActivePlayback();
+				await this.cleanupStreamStatus();
 			}
 			return false;
 		}
 
-		if (wasPlaying) {
-			// Stop the current video and wait for it to wind down before starting the new one
-			this.controller?.abort();
-			this.streamer.stopStream();
-			if (this.currentPlayback) {
-				await Promise.race([
-					this.currentPlayback.catch(() => {}),
-					new Promise(resolve => setTimeout(resolve, 5000))
-				]);
-			}
-		}
+		// Replace whatever is playing (the Go Live stays open, so the channel change is seamless)
+		if (wasPlaying) await this.stopActivePlayback();
 
 		this.streamStatus.manualStop = false;
 		const next = this.queueService.getNext();
@@ -419,12 +464,10 @@ export class StreamingService {
 		this.isSkipping = true;
 
 		try {
-			// Stop the current stream immediately
-			this.streamStatus.manualStop = true;
-			this.controller?.abort();
-			this.streamer.stopStream();
-
+			// Stop the current video; it's replaced, so it won't advance the queue or close the stream
 			const currentItem = this.queueService.getCurrent(); // Get item being skipped
+			await this.stopActivePlayback();
+
 			let nextItem = this.queueService.skip(); // Advance the queue
 			if (!nextItem && this.channelService.isActive()) {
 				await this.enqueueFromChannel();
@@ -442,10 +485,8 @@ export class StreamingService {
 			const currentTitle = currentItem ? currentItem.title : 'current video';
 			await DiscordUtils.sendInfo(message, 'Skipping', `Skipping \`${currentTitle}\`. Playing next: \`${nextItem.title}\``);
 
-			// Reset manual stop flag since we're starting a new video
 			this.streamStatus.manualStop = false;
 
-			// Skip cleanup since we're playing the next item immediately
 			await this.playVideoFromQueueItem(message, nextItem);
 		} finally {
 			this.isSkipping = false;
@@ -563,6 +604,7 @@ export class StreamingService {
 		// The library only sends SIGTERM, which ffmpeg can ignore while it's reconnecting. Then the old
 		// episode keeps decoding in the background. So also end its output and force-kill it shortly after.
 		signal.addEventListener('abort', () => {
+			retireStreams();
 			try { ffmpegOutput.destroy(); } catch {}
 			setTimeout(() => { try { command.kill('SIGKILL'); } catch {} }, 2000);
 		}, { once: true });
@@ -815,7 +857,7 @@ export class StreamingService {
 	public async cleanupStreamStatus(): Promise<void> {
 		try {
 			this.controller?.abort();
-			this.streamer.stopStream();
+			this.stopStreamForReal();
 
 			// Only leave voice if we're not playing another video
 			// Check if there are items in queue that might be played
