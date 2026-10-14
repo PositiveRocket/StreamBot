@@ -42,6 +42,10 @@ export class StreamingService {
  	// Pause/resume: what is playing right now, and what is paused (if anything)
  	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number } | null = null;
  	private paused: { item: QueueItem; position: number; at: number } | null = null;
+ 	// Only one playback may run at a time. Each playback gets a number; a playback that has
+ 	// been replaced is "stale" and must not advance the queue or tear down the newer stream.
+ 	private playbackGen: number = 0;
+ 	private playbackActive: boolean = false;
 
  	constructor(client: Client, streamStatus: StreamStatus) {
  		this.client = client;
@@ -581,7 +585,15 @@ export class StreamingService {
 		await this.executeStream(input, options, message, title, source);
 	}
 
-	private async finalizeStream(message: Message, tempFile: string | null): Promise<void> {
+	private async finalizeStream(message: Message, tempFile: string | null, gen: number): Promise<void> {
+		if (gen !== this.playbackGen) {
+			// A newer video has taken over: just clean up our own leftovers
+			logger.info('Previous video stopped (replaced by a newer one)');
+			if (tempFile) {
+				try { fs.unlinkSync(tempFile); } catch {}
+			}
+			return;
+		}
 		const finishedNormally = !this.streamStatus.manualStop && this.controller && !this.controller.signal.aborted;
 		if (finishedNormally) {
 			this.channelFailures = 0;
@@ -614,13 +626,35 @@ export class StreamingService {
 		}
 	}
 
-	public playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>, resume?: ResumeInfo): Promise<void> {
-		const playback = this.playVideoInner(message, videoSource, title, videoParams, headers, resume);
+	public async playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>, resume?: ResumeInfo): Promise<void> {
+		// Never run two videos at once: stop whatever is still running first, whatever the flags say
+		if (this.playbackActive) await this.stopActivePlayback();
+		const gen = ++this.playbackGen;
+		this.playbackActive = true;
+		const playback = this.playVideoInner(message, videoSource, title, videoParams, headers, resume, gen)
+			.finally(() => { if (gen === this.playbackGen) this.playbackActive = false; });
 		this.currentPlayback = playback;
 		return playback;
 	}
 
-	private async playVideoInner(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>, resume?: ResumeInfo): Promise<void> {
+	/** Stop the running playback (it becomes stale, so it won't advance the queue) and wait for it */
+	private async stopActivePlayback(): Promise<void> {
+		logger.info('Stopping the previous video before starting the next one');
+		this.playbackGen++;
+		this.clearPaused();
+		this.cancelPendingAdvance();
+		this.controller?.abort();
+		this.streamer.stopStream();
+		if (this.currentPlayback) {
+			await Promise.race([
+				this.currentPlayback.catch(() => {}),
+				new Promise(resolve => setTimeout(resolve, 5000))
+			]);
+		}
+		this.playbackActive = false;
+	}
+
+	private async playVideoInner(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>, resume?: ResumeInfo, gen: number = this.playbackGen): Promise<void> {
 		const [guildId, channelId] = [config.guildId, config.videoChannelId];
 		this.streamStatus.manualStop = false;
 
@@ -659,7 +693,7 @@ export class StreamingService {
 			if (this.controller && !this.controller.signal.aborted) this.controller.abort();
 			this.markVideoAsFailed(videoSource);
 		} finally {
-			await this.finalizeStream(message, tempFile);
+			await this.finalizeStream(message, tempFile, gen);
 		}
 	}
 
