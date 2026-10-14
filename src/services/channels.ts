@@ -250,6 +250,12 @@ export class ChannelService {
 		return channels[next];
 	}
 
+	/** Episodes left in the current shuffle pass before it reshuffles (null if not started yet) */
+	public remainingInPass(name: string): number | null {
+		const playlist = this.playlists.get(name);
+		return playlist ? playlist.length : null;
+	}
+
 	public tune(name: string): void {
 		this.current = name;
 		logger.info(`Tuned to channel: ${name}`);

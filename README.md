@@ -222,7 +222,7 @@ Set `CHANNEL_AUTOSTART="cartoons"` (with `COMMAND_CHANNEL_ID` set) to have the b
 
 | Command | Description | Aliases |
 |---------|-------------|---------|
-| `status` | Show current streaming status | |
+| `status` | Show what's playing, how far in (with a progress bar), paused or not, the channel, and what's up next | `np`, `nowplaying` |
 | `preview <video_name>` | Generate preview thumbnails for a video | |
 | `ping` | Check bot latency | |
 | `help` | Show available commands | |

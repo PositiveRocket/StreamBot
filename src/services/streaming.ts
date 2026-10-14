@@ -1,6 +1,7 @@
 import { Client, Message } from "discord.js-selfbot-v13";
 import { Streamer, Utils, prepareStream, playStream } from "@dank074/discord-video-stream";
 import fs from 'fs';
+import ffmpeg from 'fluent-ffmpeg';
 import config from "../config.js";
 import { MediaService } from './media.js';
 import { QueueService } from './queue.js';
@@ -17,7 +18,20 @@ interface ResumeInfo {
 	tempFile: string | null;
 }
 
-function formatTime(seconds: number): string {
+/** Length of a video in seconds (null if it can't be read quickly) */
+function probeDuration(input: string): Promise<number | null> {
+	const target = input.startsWith('async:') ? input.slice('async:'.length) : input;
+	return new Promise(resolve => {
+		const timer = setTimeout(() => resolve(null), 8000);
+		ffmpeg.ffprobe(target, (err: any, data: any) => {
+			clearTimeout(timer);
+			const d = Number(data?.format?.duration);
+			resolve(!err && isFinite(d) && d > 0 ? d : null);
+		});
+	});
+}
+
+export function formatTime(seconds: number): string {
 	const s = Math.floor(seconds);
 	const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
 	const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
@@ -40,7 +54,7 @@ export class StreamingService {
  	private streamerRawListeners: ((...args: any[]) => void)[] = [];
  	private needsFreshStreamer: boolean = false;
  	// Pause/resume: what is playing right now, and what is paused (if anything)
- 	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number } | null = null;
+ 	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number; duration?: number | null } | null = null;
  	private paused: { item: QueueItem; position: number; at: number } | null = null;
  	// Only one playback may run at a time. Each playback gets a number; a playback that has
  	// been replaced is "stale" and must not advance the queue or tear down the newer stream.
@@ -164,6 +178,36 @@ export class StreamingService {
 			'-reconnect_delay_max 10',
 			'-rw_timeout 30000000',
 		];
+	}
+
+	/** Everything the !status command shows */
+	public async getStatus(): Promise<{
+		title: string | null; position: number | null; duration: number | null; paused: boolean;
+		channel: string | null; channelLeft: number | null; upNext: string[]; joined: boolean;
+	}> {
+		const item = this.queueService.getCurrent();
+		const now = this.nowPlaying;
+		const playing = !!(now && item && (this.streamStatus.playing || this.paused));
+		let position: number | null = null;
+		let duration: number | null = null;
+		if (playing && now) {
+			position = this.paused ? this.paused.position : now.offset + (Date.now() - now.startedAt) / 1000;
+			if (now.duration === undefined) now.duration = await probeDuration(now.input);
+			duration = now.duration ?? null;
+		}
+		const items = this.queueService.getQueue();
+		const idx = item ? items.findIndex(i => i.id === item.id) : -1;
+		const upNext = items.slice(idx + 1).map(i => `${i.title}${i.requestedBy.startsWith('📺') ? '' : ` (requested by ${i.requestedBy})`}`);
+		const channel = this.channelService.getCurrent();
+		return {
+			title: playing && item ? item.title : null,
+			position, duration,
+			paused: this.paused !== null,
+			channel,
+			channelLeft: channel ? this.channelService.remainingInPass(channel) : null,
+			upNext,
+			joined: this.streamStatus.joined,
+		};
 	}
 
 	public isPaused(): boolean {
