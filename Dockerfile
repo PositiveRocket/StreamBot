@@ -21,11 +21,11 @@ RUN apt-get update && apt-get install -y \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy package.json
-COPY package.json ./
+# Copy package.json and the lockfile, so the build uses the exact tested dependency versions
+COPY package.json bun.lock ./
 
-# Install dependencies
-RUN bun install
+# Install dependencies (frozen: newer, untested versions of the voice libraries can break joining voice)
+RUN bun install --frozen-lockfile
 
 # Trust all packages
 RUN bun pm trust --all
