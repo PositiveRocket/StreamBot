@@ -59,7 +59,7 @@ export class StreamingService {
  	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number; duration?: number | null; message: Message; itemId?: string } | null = null;
  	private recovering: boolean = false;
  	private keepTempFile: string | null = null;
- 	private recoveries: { itemId: string; count: number } | null = null;
+ 	private recoveries: { itemId: string; count: number; stallAt: number; jumps: number; reopenedAt: number } | null = null;
  	private paused: { item: QueueItem; position: number; at: number } | null = null;
  	// Only one playback may run at a time. Each playback gets a number; a playback that has
  	// been replaced is "stale" and must not advance the queue or tear down the newer stream.
@@ -229,21 +229,36 @@ export class StreamingService {
 		const now = this.nowPlaying;
 		if (!item || !now || item.isLive || now.itemId !== item.id) return;
 
+		// Where it froze: the last frame actually shown (if the reopened video never showed a frame, where it was reopened)
 		const sent = lastSentPosition();
-		const position = Math.max(0, now.offset + (sent ?? (Date.now() - now.startedAt) / 1000) - 1);
-		this.recoveries = this.recoveries?.itemId === item.id
-			? { itemId: item.id, count: this.recoveries.count + 1 }
-			: { itemId: item.id, count: 1 };
+		const stallAt = Math.max(0, now.offset + (sent ?? 0));
+		const prev = this.recoveries?.itemId === item.id ? this.recoveries : null;
+		const count = (prev?.count ?? 0) + 1;
+		// Freezing at the same spot again means a damaged part of the file (a bad spot on the drive),
+		// so reopening right there would just freeze again: jump past it instead (10s, then 30s).
+		// (also: a reopened video that couldn't get even a few seconds past where it was reopened)
+		const sameSpot = !!prev && (Math.abs(stallAt - prev.stallAt) < 8 || stallAt - prev.reopenedAt < 3);
+		const jumps = sameSpot ? prev!.jumps + 1 : (prev?.jumps ?? 0);
+		const JUMPS = [0, 10, 30];
 
 		this.recovering = true;
 		try {
-			if (this.recoveries.count > 3) {
+			if (jumps >= JUMPS.length || count > 6) {
+				this.recoveries = null;
 				logger.warn(`${item.title} keeps stalling, skipping it`);
-				await DiscordUtils.sendInfo(now.message, 'Skipping', `\`${item.title}\` keeps stalling, moving on.`).catch(() => {});
+				await DiscordUtils.sendInfo(now.message, 'Skipping', `\`${item.title}\` keeps freezing, moving on to the next one.`).catch(() => {});
 				await this.skipCurrent(now.message);
 				return;
 			}
-			logger.warn(`Source stalled, reopening ${item.title} at ${formatTime(position)} (attempt ${this.recoveries.count})`);
+			const position = sameSpot ? stallAt + JUMPS[jumps] : Math.max(0, stallAt - 1);
+			this.recoveries = { itemId: item.id, count, stallAt, jumps, reopenedAt: position };
+			if (sameSpot) {
+				logger.warn(`Damaged spot in ${item.url} around ${formatTime(stallAt)}, skipping ahead ${JUMPS[jumps]}s`);
+				await DiscordUtils.sendInfo(now.message, 'Damaged spot',
+					`\`${item.title}\` can't be read around ${formatTime(stallAt)} (drive problem), skipping ahead ${JUMPS[jumps]}s. This file may need re-downloading.`
+				).catch(() => {});
+			}
+			logger.warn(`Source stalled, reopening ${item.title} at ${formatTime(position)} (attempt ${count})`);
 			this.keepTempFile = now.tempFile;
 			await this.stopActivePlayback();   // the stalled playback becomes stale: it won't advance the queue
 			this.keepTempFile = null;
