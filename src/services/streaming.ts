@@ -22,13 +22,40 @@ export class StreamingService {
  	private currentPlayback: Promise<void> | null = null;
  	private channelFailures: number = 0;
  	private advanceTimer: ReturnType<typeof setTimeout> | null = null;
+ 	private client: Client;
+ 	private streamerRawListeners: ((...args: any[]) => void)[] = [];
+ 	private needsFreshStreamer: boolean = false;
 
  	constructor(client: Client, streamStatus: StreamStatus) {
- 		this.streamer = new Streamer(client);
+ 		this.client = client;
+ 		this.streamer = this.createStreamer();
  		this.mediaService = new MediaService();
  		this.queueService = new QueueService();
  		this.streamStatus = streamStatus;
  	}
+
+	/**
+	 * Build a Streamer and remember the gateway listener it adds to the client, so it can be
+	 * removed again when the Streamer is replaced.
+	 */
+	private createStreamer(): Streamer {
+		const before = new Set(this.client.listeners('raw'));
+		const streamer = new Streamer(this.client);
+		this.streamerRawListeners = this.client.listeners('raw').filter(l => !before.has(l)) as any;
+		return streamer;
+	}
+
+	/**
+	 * The voice library keeps internal state between voice sessions, and after leaving voice the
+	 * next stream could fail ("Track is not open") even though a fresh start works. So every
+	 * time the bot joins voice again after leaving, it gets a brand-new Streamer.
+	 */
+	private renewStreamer(): void {
+		for (const listener of this.streamerRawListeners) this.client.off('raw', listener);
+		this.streamer = this.createStreamer();
+		this.needsFreshStreamer = false;
+		logger.info('Voice connector renewed for a fresh join');
+	}
 
 	public getStreamer(): Streamer {
 		return this.streamer;
@@ -99,6 +126,22 @@ export class StreamingService {
 			ErrorUtils.handleError(err, 'starting channel playback')
 		);
 		return true;
+	}
+
+	/**
+	 * Network channel episodes: reconnect after a dropped connection (but NOT at the end of the
+	 * file, which made .mkv episodes hang), and give up on a read that stalls for 30s so a dead
+	 * connection fails loudly and the channel moves on instead of freezing silently.
+	 */
+	private channelInputOptions(input: any): string[] | undefined {
+		if (typeof input !== 'string' || !input.startsWith('async:http')) return undefined;
+		return [
+			'-reconnect 1',
+			'-reconnect_streamed 1',
+			'-reconnect_on_network_error 1',
+			'-reconnect_delay_max 10',
+			'-rw_timeout 30000000',
+		];
 	}
 
 	private cancelPendingAdvance(): void {
@@ -265,6 +308,7 @@ export class StreamingService {
 	private async ensureVoiceConnection(guildId: string, channelId: string, title?: string): Promise<void> {
 		// Only join voice if not already connected
 		if (!this.streamStatus.joined || !this.streamer.voiceConnection) {
+			if (this.needsFreshStreamer) this.renewStreamer();
 			await this.streamer.joinVoice(guildId, channelId);
 			this.streamStatus.joined = true;
 		}
@@ -284,7 +328,7 @@ export class StreamingService {
 		}
 	}
 
-	private setupStreamConfiguration(videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>): any {
+	private setupStreamConfiguration(videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>, inputOptions?: string[]): any {
 		let width = videoParams?.width || config.width;
 		let height = videoParams?.height || config.height;
 		let frameRate = videoParams?.fps || config.fps;
@@ -322,7 +366,8 @@ export class StreamingService {
 			minimizeLatency: false,
 			h26xPreset: config.h26xPreset,
 			// Merged by the library with its default User-Agent/Connection headers
-			...(headers && Object.keys(headers).length > 0 && { customHeaders: headers })
+			...(headers && Object.keys(headers).length > 0 && { customHeaders: headers }),
+			...(inputOptions && inputOptions.length > 0 && { customInputOptions: inputOptions })
 		};
 	}
 
@@ -515,7 +560,7 @@ export class StreamingService {
 			await this.ensureVoiceConnection(guildId, channelId, title);
 			await DiscordUtils.sendPlaying(message, title || videoSource);
 
-			const streamOpts = this.setupStreamConfiguration(videoParams, headers);
+			const streamOpts = this.setupStreamConfiguration(videoParams, headers, this.channelInputOptions(inputForFfmpeg));
 			await this.executeStreamWorkflow(inputForFfmpeg, streamOpts, message, title || videoSource, videoSource);
 		} catch (error) {
 			await ErrorUtils.handleError(error, `playing video: ${title || videoSource}`);
@@ -536,6 +581,7 @@ export class StreamingService {
 			const hasQueueItems = !this.queueService.isEmpty();
 			if (!hasQueueItems) {
 				this.streamer.leaveVoice();
+				this.needsFreshStreamer = true;
 				this.streamStatus.joined = false;
 				this.streamStatus.joinsucc = false;
 			}
