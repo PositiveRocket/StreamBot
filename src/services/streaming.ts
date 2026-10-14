@@ -120,10 +120,36 @@ export class StreamingService {
 				return open;
 			}
 			const conn: any = await realCreate();
+			// Viewers sync picture and sound using the RTP timestamps of each track, which must
+			// keep pace with real time. On a stream that stays open across gaps (between episodes,
+			// stalls, pauses) audio sends nothing and video only resends a held picture, so both
+			// clocks fall behind, by different amounts: viewers then get stuttering, low-fps video.
+			// Realign both clocks to real time whenever playback resumes on this stream.
+			const TWO32 = 2 ** 32;
+			conn.__realign = () => {
+				const v = conn._videoPacketizer?.rtpConfig, a = conn._audioPacketizer?.rtpConfig;
+				if (!v || !a) return;
+				const now = performance.now();
+				if (!conn.__clock) {
+					conn.__clock = { t: now, v: v.timestamp, a: a.timestamp };
+					return;
+				}
+				const elapsed = (now - conn.__clock.t) / 1000;
+				for (const [cfg, base] of [[v, conn.__clock.v], [a, conn.__clock.a]] as [any, number][]) {
+					const expected = (base + Math.round(elapsed * cfg.clockRate)) % TWO32;
+					const behind = ((expected - cfg.timestamp) % TWO32 + TWO32) % TWO32;
+					if (behind > 0 && behind < TWO32 / 2) cfg.timestamp = expected; // only ever move forward
+				}
+			};
 			const setPacketizer = conn.setPacketizer.bind(conn);
 			conn.setPacketizer = (codec: string) => {
-				if (conn._videoPacketizer) return; // already set up: keep the RTP numbering going
+				if (conn._videoPacketizer) {
+					// already set up: keep the RTP numbering going, just bring the clocks up to now
+					conn.__realign();
+					return;
+				}
 				setPacketizer(codec);
+				conn.__realign(); // start the clock
 			};
 			const media = conn.mediaConnection;
 			const setVideoAttributes = media.setVideoAttributes.bind(media);

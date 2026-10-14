@@ -92,7 +92,7 @@ function startWatchdog(stream: any): void {
 		if (idle < STALL_AFTER_MS || !stream.__lastKey) return;
 		if (stream.__endedAt) {
 			// Between episodes: just hold the picture, this isn't a stall
-			try { Promise.resolve(stream._sendFrame(stream.__lastKey, stream.__frametime || 33)).catch(() => stop()); } catch { stop(); }
+			try { Promise.resolve(stream._sendFrame(stream.__lastKey, KEEPALIVE_EVERY_MS)).catch(() => stop()); } catch { stop(); }
 			return;
 		}
 		if (!closed && idle > GIVE_UP_STALL_MS) {
@@ -110,7 +110,7 @@ function startWatchdog(stream: any): void {
 			try { stallHandler(); } catch (error) { logger.error('Stall recovery failed:', error); }
 		}
 		try {
-			Promise.resolve(stream._sendFrame(stream.__lastKey, stream.__frametime || 33)).catch(() => stop());
+			Promise.resolve(stream._sendFrame(stream.__lastKey, KEEPALIVE_EVERY_MS)).catch(() => stop());
 		} catch {
 			stop();
 		}
@@ -175,6 +175,8 @@ export async function installPauseGate(): Promise<void> {
 					this.__lastSent = Date.now();
 					if (isFinite(pts)) this.__lastPts = pts;
 					if (this.__stalledSince) {
+						// Real frames again after a stall/pause: bring the stream's clocks up to real time
+						try { this._conn?.__realign?.(); } catch {}
 						const secs = ((Date.now() - this.__stalledSince) / 1000).toFixed(1);
 						if (!this.__stallWasPause) logger.info(`Video resumed after a ${secs}s stall`);
 						this.__stalledSince = null;
