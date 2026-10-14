@@ -84,6 +84,9 @@ export default {
 	channelAutostart: process.env.CHANNEL_AUTOSTART ? process.env.CHANNEL_AUTOSTART.trim() : '',
 	// Keep the Go Live open between videos instead of restarting the screen share each time
 	seamlessTransitions: process.env.SEAMLESS_TRANSITIONS ? parseBoolean(process.env.SEAMLESS_TRANSITIONS) : true,
+	// Leave the voice channel after being alone in it this many minutes (0 = never)
+	aloneTimeoutMinutes: process.env.ALONE_TIMEOUT_MINUTES !== undefined && process.env.ALONE_TIMEOUT_MINUTES.trim() !== ''
+		? Math.max(0, Number(process.env.ALONE_TIMEOUT_MINUTES) || 0) : 3,
 
 	// yt-dlp options
 	ytdlpCookiesPath: process.env.YTDLP_COOKIES_PATH ? process.env.YTDLP_COOKIES_PATH : '',

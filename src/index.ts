@@ -117,6 +117,7 @@ async function autostartChannel(): Promise<void> {
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
 	await handleVoiceStateUpdate(oldState, newState, streamStatus, client);
+	streamingService.checkAlone();
 });
 
 client.on('messageCreate', async (message) => {

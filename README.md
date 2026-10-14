@@ -217,6 +217,8 @@ Videos are shuffled with no repeats until the whole folder has played (set `CHAN
 
 Episode changes, skips and channel flips keep the same screen share open, so viewers don't see the stream stop and restart (set `SEAMLESS_TRANSITIONS="false"` to turn this off).
 
+If everyone else leaves the voice channel, the bot stops and leaves after 3 minutes (`ALONE_TIMEOUT_MINUTES`, `0` to turn off). Someone rejoining in time cancels it.
+
 Set `CHANNEL_AUTOSTART="cartoons"` (with `COMMAND_CHANNEL_ID` set) to have the bot tune in on its own every time it starts.
 
 ### 🔧 Utility Commands

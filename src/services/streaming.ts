@@ -60,6 +60,7 @@ export class StreamingService {
  	private recovering: boolean = false;
  	private keepTempFile: string | null = null;
  	private liveConn: any = null;
+ 	private aloneTimer: ReturnType<typeof setTimeout> | null = null;
  	private recoveries: { itemId: string; count: number; stallAt: number; jumps: number; reopenedAt: number } | null = null;
  	private paused: { item: QueueItem; position: number; at: number } | null = null;
  	// Only one playback may run at a time. Each playback gets a number; a playback that has
@@ -343,6 +344,55 @@ export class StreamingService {
 		}
 	}
 
+	/** People in the bot's voice channel other than the bot itself (null if the server isn't known yet) */
+	private othersInCall(): number | null {
+		const guild: any = this.client.guilds.cache.get(config.guildId);
+		if (!guild) return null;
+		const me = this.client.user?.id;
+		return guild.voiceStates.cache.filter((vs: any) => vs.channelId === config.videoChannelId && vs.id !== me).size;
+	}
+
+	private clearAloneTimer(): void {
+		if (this.aloneTimer) {
+			clearTimeout(this.aloneTimer);
+			this.aloneTimer = null;
+		}
+	}
+
+	/**
+	 * Called whenever anyone's voice state changes (and when the bot joins). If the bot is in the
+	 * call with nobody else, leave after ALONE_TIMEOUT_MINUTES unless someone joins in the meantime.
+	 */
+	public checkAlone(): void {
+		const minutes = config.aloneTimeoutMinutes;
+		if (!minutes || !this.streamStatus.joined) {
+			this.clearAloneTimer();
+			return;
+		}
+		const others = this.othersInCall();
+		if (others === null) return;
+		if (others > 0) {
+			if (this.aloneTimer) logger.info('Someone joined the call, staying');
+			this.clearAloneTimer();
+			return;
+		}
+		if (this.aloneTimer) return;
+		logger.info(`Nobody else is in the call, leaving in ${minutes} minute${minutes === 1 ? '' : 's'} unless someone joins`);
+		this.aloneTimer = setTimeout(async () => {
+			this.aloneTimer = null;
+			if (!this.streamStatus.joined || (this.othersInCall() ?? 1) > 0) return;
+			logger.info('Still alone in the call, leaving');
+			const channel = this.channelService.getCurrent();
+			await this.stopAndClearQueue();
+			try {
+				const text: any = config.cmdChannelId ? await this.client.channels.fetch(config.cmdChannelId) : null;
+				await text?.send(`👋 Left the call: nobody was watching for ${minutes} minute${minutes === 1 ? '' : 's'}.${channel ? ` Use \`${config.prefix}ch ${channel}\` to turn it back on.` : ''}`);
+			} catch (error) {
+				logger.warn('Could not post the auto-leave message:', error);
+			}
+		}, minutes * 60_000);
+	}
+
 	public isPaused(): boolean {
 		return this.paused !== null;
 	}
@@ -563,10 +613,13 @@ export class StreamingService {
 		if (!this.streamStatus.joined || !this.streamer.voiceConnection) {
 			if (this.needsFreshStreamer) this.renewStreamer();
 			await this.streamer.joinVoice(guildId, channelId);
+			const others = this.othersInCall();
+			logger.info(`Joined the call (${others === null ? 'unknown number of' : others} other ${others === 1 ? 'person' : 'people'} in it)`);
 			this.streamStatus.joined = true;
 		}
 		this.streamStatus.playing = true;
 		this.streamStatus.channelInfo = { guildId, channelId, cmdChannelId: config.cmdChannelId! };
+		this.checkAlone();
 
 		if (title) {
 			this.streamer.client.user?.setActivity(DiscordUtils.status_watch(title));
