@@ -9,6 +9,7 @@ import { getVideoParams } from "../utils/ffmpeg.js";
 import logger from '../utils/logger.js';
 import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
 import { QueueItem, StreamStatus } from '../types/index.js';
+import { PauseGate } from '../utils/pauseGate.js';
 
 interface ResumeInfo {
 	position: number;
@@ -40,7 +41,7 @@ export class StreamingService {
  	private needsFreshStreamer: boolean = false;
  	// Pause/resume: what is playing right now, and what is paused (if anything)
  	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number } | null = null;
- 	private paused: { item: QueueItem; position: number; input: string; tempFile: string | null } | null = null;
+ 	private paused: { item: QueueItem; position: number; at: number } | null = null;
 
  	constructor(client: Client, streamStatus: StreamStatus) {
  		this.client = client;
@@ -166,8 +167,8 @@ export class StreamingService {
 	}
 
 	/**
-	 * Pause: remember how far into the video we are, stop the stream, and stay in voice.
-	 * Resume restarts the same video from there (a couple of seconds early).
+	 * Pause: hold the current frame. The stream stays live in Discord, but no new frames are sent
+	 * (see PauseGate), so viewers see the paused picture until resume continues from the same spot.
 	 */
 	public async pause(message: Message): Promise<void> {
 		if (this.paused) {
@@ -185,17 +186,9 @@ export class StreamingService {
 			return;
 		}
 
-		const position = Math.max(0, now.offset + (Date.now() - now.startedAt) / 1000 - 2);
-		this.paused = { item, position, input: now.input, tempFile: now.tempFile };
-		this.cancelPendingAdvance();
-
-		// Stop the stream without advancing the queue; the paused item stays queued, so the bot stays in voice
-		this.streamStatus.manualStop = true;
-		this.controller?.abort();
-		this.streamer.stopStream();
-		if (this.currentPlayback) {
-			await Promise.race([this.currentPlayback.catch(() => {}), new Promise(r => setTimeout(r, 5000))]);
-		}
+		PauseGate.pause();
+		const position = Math.max(0, now.offset + (Date.now() - now.startedAt) / 1000);
+		this.paused = { item, position, at: Date.now() };
 		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(`⏸ ${item.title}`));
 		await DiscordUtils.sendInfo(message, 'Paused', `\`${item.title}\` at ${formatTime(position)}. Use \`${config.prefix}resume\` to continue.`);
 	}
@@ -206,21 +199,18 @@ export class StreamingService {
 			await DiscordUtils.sendError(message, 'Nothing is paused.');
 			return;
 		}
+		// Paused time doesn't count towards the playback position
+		if (this.nowPlaying) this.nowPlaying.startedAt += Date.now() - p.at;
 		this.paused = null;
-		this.streamStatus.manualStop = false;
-		this.queueService.setCurrentById(p.item.id);
-		this.queueService.setPlaying(true);
-		this.playVideoFromQueueItem(message, p.item, { position: p.position, input: p.input, tempFile: p.tempFile })
-			.catch(err => ErrorUtils.handleError(err, 'resuming playback'));
+		PauseGate.resume();
+		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(p.item.title));
+		await DiscordUtils.sendInfo(message, 'Resumed', `\`${p.item.title}\` from ${formatTime(p.position)}`);
 	}
 
-	/** Forget the paused video (and delete its downloaded copy, if any) */
+	/** Drop the pause (on stop, skip, channel change or when the video ends) and release held frames */
 	private clearPaused(): void {
-		const p = this.paused;
 		this.paused = null;
-		if (p?.tempFile) {
-			try { fs.unlinkSync(p.tempFile); } catch {}
-		}
+		if (PauseGate.paused) PauseGate.resume();
 	}
 
 	private cancelPendingAdvance(): void {
@@ -299,27 +289,7 @@ export class StreamingService {
 	}
 
 	public async skipCurrent(message: Message): Promise<void> {
-		if (this.paused) {
-			// Skipping while paused: drop the paused video and play whatever is next
-			const skipped = this.paused.item;
-			this.clearPaused();
-			this.queueService.removeFromQueue(skipped.id);
-			this.queueService.resetCurrentIndex();
-			let next = this.queueService.getNext();
-			if (!next && this.channelService.isActive()) {
-				await this.enqueueFromChannel();
-				next = this.queueService.getNext();
-			}
-			if (!next) {
-				await DiscordUtils.sendInfo(message, 'Queue', 'No more videos in queue.');
-				await this.cleanupStreamStatus();
-				return;
-			}
-			await DiscordUtils.sendInfo(message, 'Skipping', `Skipping \`${skipped.title}\`. Playing next: \`${next.title}\``);
-			this.queueService.setPlaying(true);
-			this.playVideoFromQueueItem(message, next).catch(err => ErrorUtils.handleError(err, 'playing after skip'));
-			return;
-		}
+		this.clearPaused();
 
 		if (!this.streamStatus.playing) {
 			await DiscordUtils.sendError(message, 'No video is currently playing.');
@@ -634,7 +604,8 @@ export class StreamingService {
 		}
 
 		this.nowPlaying = null;
-		if (tempFile && this.paused?.tempFile !== tempFile) {
+		this.clearPaused();
+		if (tempFile) {
 			try {
 				fs.unlinkSync(tempFile);
 			} catch (cleanupError) {

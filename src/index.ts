@@ -15,6 +15,7 @@ import { StreamingService } from './services/streaming.js';
 import { MediaService } from './services/media.js';
 import { CommandManager } from './commands/manager.js';
 import { QueueService } from './services/queue.js';
+import { installPauseGate } from './utils/pauseGate.js';
 
 // Download yt-dlp and check for updates
 (async () => {
@@ -137,4 +138,6 @@ if (config.server_enabled) {
 }
 
 // Login to Discord
+// Freeze-frame pause support, then log in
+await installPauseGate();
 client.login(config.token);
