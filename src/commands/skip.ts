@@ -11,6 +11,11 @@ export default class SkipCommand extends BaseCommand {
 		const currentItem = context.streamingService.getQueueService().getCurrent();
 		const queueLength = context.streamingService.getQueueService().getLength();
 
+		if (context.streamingService.isPaused()) {
+			await context.streamingService.skipCurrent(context.message);
+			return;
+		}
+
 		if (!context.streamStatus.playing) {
 			await this.sendError(context.message, 'No video is currently playing.');
 			return;

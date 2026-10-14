@@ -173,6 +173,16 @@ export class QueueService {
 	}
 
 	/**
+	 * Point the current index at a specific item (used when resuming a paused video)
+	 */
+	setCurrentById(id: string): boolean {
+		const index = this.queue.items.findIndex(item => item.id === id);
+		if (index === -1) return false;
+		this.queue.currentIndex = index;
+		return true;
+	}
+
+	/**
 	 * Reset the current index to -1 (no current item)
 	 */
 	resetCurrentIndex(): void {

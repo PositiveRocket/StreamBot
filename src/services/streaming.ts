@@ -10,6 +10,19 @@ import logger from '../utils/logger.js';
 import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
 import { QueueItem, StreamStatus } from '../types/index.js';
 
+interface ResumeInfo {
+	position: number;
+	input: string;
+	tempFile: string | null;
+}
+
+function formatTime(seconds: number): string {
+	const s = Math.floor(seconds);
+	const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+	const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
+	return `${h > 0 ? h + ':' : ''}${mm}:${String(sec).padStart(2, '0')}`;
+}
+
 export class StreamingService {
  	private streamer: Streamer;
  	private mediaService: MediaService;
@@ -25,6 +38,9 @@ export class StreamingService {
  	private client: Client;
  	private streamerRawListeners: ((...args: any[]) => void)[] = [];
  	private needsFreshStreamer: boolean = false;
+ 	// Pause/resume: what is playing right now, and what is paused (if anything)
+ 	private nowPlaying: { input: string; tempFile: string | null; offset: number; startedAt: number } | null = null;
+ 	private paused: { item: QueueItem; position: number; input: string; tempFile: string | null } | null = null;
 
  	constructor(client: Client, streamStatus: StreamStatus) {
  		this.client = client;
@@ -89,6 +105,7 @@ export class StreamingService {
 		this.channelService.tune(channelName);
 		this.channelFailures = 0;
 		this.cancelPendingAdvance();
+		this.clearPaused();
 
 		const wasPlaying = this.streamStatus.playing;
 		if (wasPlaying) this.streamStatus.manualStop = true;
@@ -142,6 +159,68 @@ export class StreamingService {
 			'-reconnect_delay_max 10',
 			'-rw_timeout 30000000',
 		];
+	}
+
+	public isPaused(): boolean {
+		return this.paused !== null;
+	}
+
+	/**
+	 * Pause: remember how far into the video we are, stop the stream, and stay in voice.
+	 * Resume restarts the same video from there (a couple of seconds early).
+	 */
+	public async pause(message: Message): Promise<void> {
+		if (this.paused) {
+			await DiscordUtils.sendError(message, `Already paused. Use \`${config.prefix}resume\` to continue.`);
+			return;
+		}
+		const item = this.queueService.getCurrent();
+		const now = this.nowPlaying;
+		if (!this.streamStatus.playing || !item || !now) {
+			await DiscordUtils.sendError(message, 'Nothing is playing right now.');
+			return;
+		}
+		if (item.isLive) {
+			await DiscordUtils.sendError(message, "Live streams can't be paused.");
+			return;
+		}
+
+		const position = Math.max(0, now.offset + (Date.now() - now.startedAt) / 1000 - 2);
+		this.paused = { item, position, input: now.input, tempFile: now.tempFile };
+		this.cancelPendingAdvance();
+
+		// Stop the stream without advancing the queue; the paused item stays queued, so the bot stays in voice
+		this.streamStatus.manualStop = true;
+		this.controller?.abort();
+		this.streamer.stopStream();
+		if (this.currentPlayback) {
+			await Promise.race([this.currentPlayback.catch(() => {}), new Promise(r => setTimeout(r, 5000))]);
+		}
+		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(`⏸ ${item.title}`));
+		await DiscordUtils.sendInfo(message, 'Paused', `\`${item.title}\` at ${formatTime(position)}. Use \`${config.prefix}resume\` to continue.`);
+	}
+
+	public async resume(message: Message): Promise<void> {
+		const p = this.paused;
+		if (!p) {
+			await DiscordUtils.sendError(message, 'Nothing is paused.');
+			return;
+		}
+		this.paused = null;
+		this.streamStatus.manualStop = false;
+		this.queueService.setCurrentById(p.item.id);
+		this.queueService.setPlaying(true);
+		this.playVideoFromQueueItem(message, p.item, { position: p.position, input: p.input, tempFile: p.tempFile })
+			.catch(err => ErrorUtils.handleError(err, 'resuming playback'));
+	}
+
+	/** Forget the paused video (and delete its downloaded copy, if any) */
+	private clearPaused(): void {
+		const p = this.paused;
+		this.paused = null;
+		if (p?.tempFile) {
+			try { fs.unlinkSync(p.tempFile); } catch {}
+		}
 	}
 
 	private cancelPendingAdvance(): void {
@@ -204,6 +283,11 @@ export class StreamingService {
 			return;
 		}
 
+		if (this.paused) {
+			await DiscordUtils.sendInfo(message, 'Paused', `Playback is paused. Use \`${config.prefix}resume\` to continue.`);
+			return;
+		}
+
 		const nextItem = this.queueService.getNext();
 		if (!nextItem) {
 			await DiscordUtils.sendError(message, 'Queue is empty.');
@@ -215,6 +299,28 @@ export class StreamingService {
 	}
 
 	public async skipCurrent(message: Message): Promise<void> {
+		if (this.paused) {
+			// Skipping while paused: drop the paused video and play whatever is next
+			const skipped = this.paused.item;
+			this.clearPaused();
+			this.queueService.removeFromQueue(skipped.id);
+			this.queueService.resetCurrentIndex();
+			let next = this.queueService.getNext();
+			if (!next && this.channelService.isActive()) {
+				await this.enqueueFromChannel();
+				next = this.queueService.getNext();
+			}
+			if (!next) {
+				await DiscordUtils.sendInfo(message, 'Queue', 'No more videos in queue.');
+				await this.cleanupStreamStatus();
+				return;
+			}
+			await DiscordUtils.sendInfo(message, 'Skipping', `Skipping \`${skipped.title}\`. Playing next: \`${next.title}\``);
+			this.queueService.setPlaying(true);
+			this.playVideoFromQueueItem(message, next).catch(err => ErrorUtils.handleError(err, 'playing after skip'));
+			return;
+		}
+
 		if (!this.streamStatus.playing) {
 			await DiscordUtils.sendError(message, 'No video is currently playing.');
 			return;
@@ -266,7 +372,7 @@ export class StreamingService {
 		}
 	}
 
-	private async playVideoFromQueueItem(message: Message, queueItem: QueueItem): Promise<void> {
+	private async playVideoFromQueueItem(message: Message, queueItem: QueueItem, resume?: ResumeInfo): Promise<void> {
 		// Ensure queue is marked as playing
 		this.queueService.setPlaying(true);
 
@@ -280,7 +386,7 @@ export class StreamingService {
 		logger.info(`Playing from queue: ${queueItem.title} (${queueItem.url})`);
 
 		// Use streaming service to play the video with video parameters
-		await this.playVideo(message, queueItem.url, queueItem.title, videoParams, queueItem.headers);
+		await this.playVideo(message, queueItem.url, queueItem.title, videoParams, queueItem.headers, resume);
 	}
 
 	private async getVideoParameters(videoUrl: string, headers?: Record<string, string>): Promise<{ width: number, height: number, fps?: number, bitrate?: number } | undefined> {
@@ -388,6 +494,7 @@ export class StreamingService {
 			}
 		});
 
+		if (this.nowPlaying) this.nowPlaying.startedAt = Date.now();
 		await playStream(ffmpegOutput, this.streamer, undefined, this.controller!.signal)
 			.catch((err) => {
 				if (this.controller && !this.controller.signal.aborted) {
@@ -526,7 +633,8 @@ export class StreamingService {
 			await this.cleanupStreamStatus();
 		}
 
-		if (tempFile) {
+		this.nowPlaying = null;
+		if (tempFile && this.paused?.tempFile !== tempFile) {
 			try {
 				fs.unlinkSync(tempFile);
 			} catch (cleanupError) {
@@ -535,13 +643,13 @@ export class StreamingService {
 		}
 	}
 
-	public playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>): Promise<void> {
-		const playback = this.playVideoInner(message, videoSource, title, videoParams, headers);
+	public playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>, resume?: ResumeInfo): Promise<void> {
+		const playback = this.playVideoInner(message, videoSource, title, videoParams, headers, resume);
 		this.currentPlayback = playback;
 		return playback;
 	}
 
-	private async playVideoInner(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>): Promise<void> {
+	private async playVideoInner(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, headers?: Record<string, string>, resume?: ResumeInfo): Promise<void> {
 		const [guildId, channelId] = [config.guildId, config.videoChannelId];
 		this.streamStatus.manualStop = false;
 
@@ -554,13 +662,26 @@ export class StreamingService {
 
 		let tempFile: string | null = null;
 		try {
-			const { inputForFfmpeg, tempFilePath } = await this.prepareVideoSource(message, videoSource, title, headers);
+			// When resuming, reuse the already-prepared input (e.g. the downloaded YouTube file)
+			const { inputForFfmpeg, tempFilePath } = resume
+				? { inputForFfmpeg: resume.input, tempFilePath: resume.tempFile }
+				: await this.prepareVideoSource(message, videoSource, title, headers);
 			tempFile = tempFilePath;
+			const offset = resume?.position ?? 0;
 
 			await this.ensureVoiceConnection(guildId, channelId, title);
-			await DiscordUtils.sendPlaying(message, title || videoSource);
+			if (resume) {
+				await DiscordUtils.sendInfo(message, 'Resumed', `\`${title || videoSource}\` from ${formatTime(offset)}`);
+			} else {
+				await DiscordUtils.sendPlaying(message, title || videoSource);
+			}
 
-			const streamOpts = this.setupStreamConfiguration(videoParams, headers, this.channelInputOptions(inputForFfmpeg));
+			const inputOptions = [
+				...(offset > 0 ? [`-ss ${offset.toFixed(1)}`] : []),
+				...(this.channelInputOptions(inputForFfmpeg) || []),
+			];
+			this.nowPlaying = { input: inputForFfmpeg, tempFile, offset, startedAt: Date.now() };
+			const streamOpts = this.setupStreamConfiguration(videoParams, headers, inputOptions);
 			await this.executeStreamWorkflow(inputForFfmpeg, streamOpts, message, title || videoSource, videoSource);
 		} catch (error) {
 			await ErrorUtils.handleError(error, `playing video: ${title || videoSource}`);
@@ -605,6 +726,7 @@ export class StreamingService {
 		this.channelService.off();
 		this.channelFailures = 0;
 		this.cancelPendingAdvance();
+		this.clearPaused();
 
 		// Clear the queue
 		this.queueService.clearQueue();
