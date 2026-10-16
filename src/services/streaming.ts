@@ -210,7 +210,7 @@ export class StreamingService {
 	 * Switch to a channel. Whatever is playing is cut off immediately and the
 	 * queue is cleared, like flipping the channel on a TV.
 	 */
-	public async tuneChannel(message: Message, channelName: string): Promise<boolean> {
+	public async tuneChannel(message: Message, channelName: string, announce?: (firstEpisode: string) => Promise<void>): Promise<boolean> {
 		this.channelService.tune(channelName);
 		this.channelFailures = 0;
 		this.cancelPendingAdvance();
@@ -229,6 +229,8 @@ export class StreamingService {
 			}
 			return false;
 		}
+
+		if (announce) await announce(item.title).catch(() => {});
 
 		// Replace whatever is playing (the Go Live stays open, so the channel change is seamless)
 		if (wasPlaying) await this.stopActivePlayback();
@@ -419,7 +421,7 @@ export class StreamingService {
 		this.paused = { item, position, at: Date.now() };
 		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(`⏸ ${item.title}`));
 		logger.info(`Paused ${item.title} at ${formatTime(position)}`);
-		await Feedback.react(message, '⏸️');
+		await Feedback.reply(message, `⏸️ **Paused** \`${item.title}\` at ${formatTime(position)}. Type \`${config.prefix}pause\` again to resume.`);
 	}
 
 	public async resume(message: Message): Promise<void> {
@@ -434,7 +436,7 @@ export class StreamingService {
 		PauseGate.resume();
 		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(p.item.title));
 		logger.info(`Resumed ${p.item.title} from ${formatTime(p.position)}`);
-		await Feedback.react(message, '▶️');
+		await Feedback.reply(message, `▶️ **Resumed** \`${p.item.title}\` from ${formatTime(p.position)}.`);
 	}
 
 	/** Drop the pause (on stop, skip, channel change or when the video ends) and release held frames */
@@ -552,8 +554,7 @@ export class StreamingService {
 			if (!nextItem) {
 				// No more items in queue - stop playback and leave voice channel
 				if (!opts.silent) {
-					await Feedback.react(message, '⏭️');
-					await message.channel.send(`⏭️ **Skipped** \`${currentItem?.title ?? 'video'}\`. Nothing left to play.`).catch(() => {});
+					await Feedback.reply(message, `⏭️ **Skipped** \`${currentItem?.title ?? 'video'}\`. Nothing left to play.`);
 				}
 				this.queueService.setPlaying(false);
 				await this.cleanupStreamStatus();
@@ -562,8 +563,7 @@ export class StreamingService {
 
 			const currentTitle = currentItem ? currentItem.title : 'current video';
 			if (!opts.silent) {
-				await Feedback.react(message, '⏭️');
-				await message.channel.send(`⏭️ **Skipping** \`${currentTitle}\`. Playing next: \`${nextItem.title}\``).catch(() => {});
+				await Feedback.reply(message, `⏭️ **Skipping** \`${currentTitle}\`. Playing next: \`${nextItem.title}\``);
 			}
 
 			this.streamStatus.manualStop = false;
@@ -898,7 +898,7 @@ export class StreamingService {
 
 			await this.ensureVoiceConnection(guildId, channelId, title);
 			if (!resume) {
-				await Feedback.started(message);
+				await Feedback.started(message, title || videoSource);
 			}
 
 			const inputOptions = [
@@ -910,7 +910,7 @@ export class StreamingService {
 			await this.executeStreamWorkflow(inputForFfmpeg, streamOpts, message, title || videoSource, videoSource);
 		} catch (error) {
 			await ErrorUtils.handleError(error, `playing video: ${title || videoSource}`);
-			await Feedback.failed(message);
+			await Feedback.failed(message, title || videoSource);
 			if (this.controller && !this.controller.signal.aborted) this.controller.abort();
 			this.markVideoAsFailed(videoSource);
 		} finally {

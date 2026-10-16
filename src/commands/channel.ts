@@ -26,7 +26,7 @@ export default class ChannelCommand extends BaseCommand {
 			if (!was) {
 				await this.sendError(context.message, 'No channel is on.');
 			} else {
-				await Feedback.react(context.message, '📴');
+				await Feedback.reply(context.message, `📴 **${was}** turned off. The current video will finish, then the bot stops (\`${config.prefix}stop\` to stop now).`);
 			}
 			return;
 		}
@@ -54,8 +54,9 @@ export default class ChannelCommand extends BaseCommand {
 			return;
 		}
 
-		await Feedback.react(context.message, '📺');
-		await service.tuneChannel(context.message, target.name);
+		await service.tuneChannel(context.message, target.name, (first: string) =>
+			Feedback.reply(context.message, `📺 Tuned to **${target.name}**, starting with \`${first}\``)
+		);
 	}
 
 	private async showGuide(context: CommandContext): Promise<void> {

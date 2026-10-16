@@ -110,20 +110,20 @@ export const Feedback = {
 		await Feedback.react(message, '⏳');
 	},
 
-	/** The video for this command is now on screen: ⏳ becomes ▶️ (only for commands showing ⏳) */
-	async started(message: Message | null | undefined): Promise<void> {
+	/** The video for this command is now on screen: ⏳ goes away and the command gets its answer */
+	async started(message: Message | null | undefined, title?: string): Promise<void> {
 		if (!message || !loading.has(message)) return;
 		loading.delete(message);
 		await Feedback.unreact(message, '⏳');
-		await Feedback.react(message, '▶️');
+		if (title) await Feedback.reply(message, `▶️ **Now playing**: \`${title}\``);
 	},
 
-	/** The video for this command couldn't start: ⏳ becomes ❌ */
-	async failed(message: Message | null | undefined): Promise<void> {
+	/** The video for this command couldn't start: ⏳ goes away and the command gets an error */
+	async failed(message: Message | null | undefined, title?: string): Promise<void> {
 		if (!message || !loading.has(message)) return;
 		loading.delete(message);
 		await Feedback.unreact(message, '⏳');
-		await Feedback.react(message, '❌');
+		if (title) await Feedback.reply(message, `❌ Couldn't play \`${title}\`.`);
 	},
 
 	/** Reply without pinging the person who sent the command */

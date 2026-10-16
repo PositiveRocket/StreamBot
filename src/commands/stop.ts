@@ -17,8 +17,10 @@ export default class StopCommand extends BaseCommand {
 
 		try {
 			context.streamStatus.manualStop = true;
-
-			await Feedback.react(context.message, '⏹️');
+			const channel = context.streamingService.getChannelService().getCurrent();
+			await Feedback.reply(context.message, channel
+				? `⏹️ **Stopped** ${channel} and cleared the queue.`
+				: `⏹️ **Stopped** and cleared the queue.`);
 			logger.info("Stopped playing video and cleared queue.");
 
 			// Use streaming service to handle the stop and clear queue

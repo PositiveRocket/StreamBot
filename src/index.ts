@@ -109,7 +109,9 @@ async function autostartChannel(): Promise<void> {
 		}
 		const textChannel: any = await client.channels.fetch(config.cmdChannelId);
 		const anchor = await textChannel.send(`📺 Tuned to **${target.name}** (auto-started)`);
-		await streamingService.tuneChannel(anchor, target.name);
+		await streamingService.tuneChannel(anchor, target.name, (first: string) =>
+			anchor.edit(`📺 Tuned to **${target.name}** (auto-started), starting with \`${first}\``)
+		);
 	} catch (error) {
 		logger.error('Failed to autostart channel:', error);
 	}
