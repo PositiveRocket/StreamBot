@@ -1,4 +1,5 @@
 import { BaseCommand } from "./base.js";
+import { Feedback } from "../utils/shared.js";
 import { CommandContext } from "../types/index.js";
 import config from "../config.js";
 
@@ -25,7 +26,7 @@ export default class ChannelCommand extends BaseCommand {
 			if (!was) {
 				await this.sendError(context.message, 'No channel is on.');
 			} else {
-				await this.sendSuccess(context.message, `Turned off \`${was}\`. The current video will finish, then the bot stops (use \`${config.prefix}stop\` to stop right away).`);
+				await Feedback.react(context.message, '📴');
 			}
 			return;
 		}
@@ -53,8 +54,7 @@ export default class ChannelCommand extends BaseCommand {
 			return;
 		}
 
-		await context.message.react('📺').catch(() => {});
-		await context.message.channel.send(`📺 **Now tuned to**: \`${target.name}\` (${target.fileCount} video${target.fileCount === 1 ? '' : 's'})`);
+		await Feedback.react(context.message, '📺');
 		await service.tuneChannel(context.message, target.name);
 	}
 
@@ -87,7 +87,6 @@ export default class ChannelCommand extends BaseCommand {
 			? `Watching **${current}**. \`${p}ch up\` / \`${p}ch down\` to flip, \`${p}ch off\` to stop after this video.`
 			: `\`${p}ch <name or number>\` to tune in.`;
 
-		await context.message.react('📋').catch(() => {});
 		await context.message.channel.send(`📺 **Channel Guide**\n${lines.join('\n')}\n\n${footer}`);
 	}
 }

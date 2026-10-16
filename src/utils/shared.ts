@@ -31,8 +31,8 @@ export const DiscordUtils = {
 	 * Send error message with reaction
 	 */
 	async sendError(message: Message, error: string): Promise<void> {
-		await message.react('❌');
-		await message.reply(`❌ **Error**: ${error}`);
+		await message.react('❌').catch(() => {});
+		await message.reply({ content: `❌ **Error**: ${error}`, allowedMentions: { repliedUser: false } } as any).catch(() => {});
 	},
 
 	/**
@@ -74,7 +74,6 @@ export const DiscordUtils = {
 	 * Send list message with reaction
 	 */
 	async sendList(message: Message, items: string[], type?: string): Promise<void> {
-		await message.react('📋');
 		if (type == "ytsearch") {
 			await message.reply(`📋 **Search Results**:\n${items.join('\n')}`);
 		} else if (type == "refresh") {
@@ -83,6 +82,55 @@ export const DiscordUtils = {
 			await message.channel.send(`📋 **Local Videos List**:\n${items.join('\n')}`);
 		}
 	}
+};
+
+/**
+ * Quiet feedback: react to the command instead of replying, so the chat isn't flooded.
+ * Messages that showed ⏳ ("loading") get it swapped for the final reaction once it starts.
+ */
+const loading = new WeakSet<object>();
+export const Feedback = {
+	async react(message: Message | null | undefined, emoji: string): Promise<void> {
+		if (!message) return;
+		await message.react(emoji).catch(() => {});
+	},
+
+	async unreact(message: Message | null | undefined, emoji: string): Promise<void> {
+		const me = message?.client?.user?.id;
+		if (!message || !me) return;
+		try {
+			await message.reactions.resolve(emoji)?.users.remove(me);
+		} catch {}
+	},
+
+	/** Show ⏳ on a command whose video is still loading */
+	async loading(message: Message | null | undefined): Promise<void> {
+		if (!message) return;
+		loading.add(message);
+		await Feedback.react(message, '⏳');
+	},
+
+	/** The video for this command is now on screen: ⏳ becomes ▶️ (only for commands showing ⏳) */
+	async started(message: Message | null | undefined): Promise<void> {
+		if (!message || !loading.has(message)) return;
+		loading.delete(message);
+		await Feedback.unreact(message, '⏳');
+		await Feedback.react(message, '▶️');
+	},
+
+	/** The video for this command couldn't start: ⏳ becomes ❌ */
+	async failed(message: Message | null | undefined): Promise<void> {
+		if (!message || !loading.has(message)) return;
+		loading.delete(message);
+		await Feedback.unreact(message, '⏳');
+		await Feedback.react(message, '❌');
+	},
+
+	/** Reply without pinging the person who sent the command */
+	async reply(message: Message | null | undefined, content: string): Promise<void> {
+		if (!message) return;
+		await message.reply({ content, allowedMentions: { repliedUser: false } } as any).catch(() => {});
+	},
 };
 
 /**

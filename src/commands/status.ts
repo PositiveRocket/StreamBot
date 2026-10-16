@@ -41,7 +41,6 @@ export default class StatusCommand extends BaseCommand {
 
 		if (s.paused) lines.push(`Use \`${p}pause\` again to continue.`);
 
-		await context.message.react('📊').catch(() => {});
 		await context.message.channel.send(lines.join('\n'));
 	}
 }

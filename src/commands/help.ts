@@ -20,7 +20,6 @@ export default class HelpCommand extends BaseCommand {
 			commandList,
 		].join('\n');
 
-		await context.message.react('📋');
-		await context.message.reply(helpText);
+		await context.message.reply({ content: helpText, allowedMentions: { repliedUser: false } } as any);
 	}
 }

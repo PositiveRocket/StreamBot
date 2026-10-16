@@ -1,7 +1,7 @@
 import { BaseCommand } from "./base.js";
 import { CommandContext } from "../types/index.js";
 import { MediaService } from "../services/media.js";
-import { ErrorUtils, GeneralUtils } from '../utils/shared.js';
+import { ErrorUtils, GeneralUtils, Feedback } from '../utils/shared.js';
 import { tokenize, parseHeaderFlags, hasHeaderFlags } from '../utils/headers.js';
 import fs from 'fs';
 import path from 'path';
@@ -77,34 +77,39 @@ export default class PlayCommand extends BaseCommand {
 	}
 
 
+	/**
+	 * Nothing on: show ⏳ on the command and start it (it turns into ▶️ once it's on screen).
+	 * Something already on: one short note saying where it landed in the queue.
+	 */
+	private async startOrQueue(context: CommandContext, item: any): Promise<void> {
+		if (!item) return;
+		const service = context.streamingService;
+		if (service.isBusy()) {
+			const pos = service.queuePosition(item.id);
+			const where = pos <= 1 ? 'plays next' : `#${pos} in line`;
+			await Feedback.reply(context.message, `➕ **Queued** (${where}): \`${item.title}\``);
+			return;
+		}
+		await Feedback.loading(context.message);
+		await service.playFromQueue(context.message);
+	}
+
 	private async handleLocalVideo(context: CommandContext, video: any): Promise<void> {
 		// Add to queue instead of playing immediately
-		const success = await context.streamingService.addToQueue(context.message, video.path, video.name);
-
-		if (success) {
-			// If not currently playing, start playing from queue
-			if (!context.streamStatus.playing) {
-				await context.streamingService.playFromQueue(context.message);
-			}
-		}
+		const item = await context.streamingService.addToQueue(context.message, video.path, video.name);
+		await this.startOrQueue(context, item);
 	}
 
 	private async handleUrl(context: CommandContext, url: string, headers: Record<string, string> = {}): Promise<void> {
 		try {
 			// For lazy processing, just add to queue - resolution happens when playing
-			const success = await context.streamingService.addToQueue(
+			const item = await context.streamingService.addToQueue(
 				context.message,
 				url,
 				undefined,
 				Object.keys(headers).length > 0 ? headers : undefined
 			);
-
-			if (success) {
-				// If not currently playing, start playing from queue
-				if (!context.streamStatus.playing) {
-					await context.streamingService.playFromQueue(context.message);
-				}
-			}
+			await this.startOrQueue(context, item);
 		} catch (error) {
 			await ErrorUtils.handleError(error, `processing URL: ${url}`, context.message);
 		}
@@ -114,14 +119,8 @@ export default class PlayCommand extends BaseCommand {
 		try {
 			// For lazy processing, add the search query to queue
 			// The actual search and resolution will happen when it's time to play
-			const success = await context.streamingService.addToQueue(context.message, query, `Search: ${query}`);
-
-			if (success) {
-				// If not currently playing, start playing from queue
-				if (!context.streamStatus.playing) {
-					await context.streamingService.playFromQueue(context.message);
-				}
-			}
+			const item = await context.streamingService.addToQueue(context.message, query, `Search: ${query}`);
+			await this.startOrQueue(context, item);
 		} catch (error) {
 			await ErrorUtils.handleError(error, 'adding search query to queue', context.message);
 		}

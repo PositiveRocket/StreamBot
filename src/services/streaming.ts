@@ -8,7 +8,7 @@ import { QueueService } from './queue.js';
 import { ChannelService } from './channels.js';
 import { getVideoParams } from "../utils/ffmpeg.js";
 import logger from '../utils/logger.js';
-import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
+import { DiscordUtils, ErrorUtils, Feedback } from '../utils/shared.js';
 import { QueueItem, StreamStatus } from '../types/index.js';
 import { PauseGate, onLongStall, lastSentPosition, endKeepAlive, retireStreams } from '../utils/pauseGate.js';
 
@@ -203,7 +203,7 @@ export class StreamingService {
 		const file = await this.channelService.nextFile();
 		if (!channel || !file) return null;
 		const type = this.channelService.isRemote() ? 'url' : 'local';
-		return this.queueService.add(file.path, `[${channel}] ${file.title}`, `📺 ${channel}`, type, false, file.path);
+		return this.queueService.add(file.path, file.title, `📺 ${channel}`, type, false, file.path);
 	}
 
 	/**
@@ -318,17 +318,14 @@ export class StreamingService {
 			if (jumps >= JUMPS.length || count > 6) {
 				this.recoveries = null;
 				logger.warn(`${item.title} keeps stalling, skipping it`);
-				await DiscordUtils.sendInfo(now.message, 'Skipping', `\`${item.title}\` keeps freezing, moving on to the next one.`).catch(() => {});
-				await this.skipCurrent(now.message);
+				await this.skipCurrent(now.message, { silent: true });
 				return;
 			}
 			const position = sameSpot ? stallAt + JUMPS[jumps] : Math.max(0, stallAt - 1);
 			this.recoveries = { itemId: item.id, count, stallAt, jumps, reopenedAt: position };
 			if (sameSpot) {
 				logger.warn(`Damaged spot in ${item.url} around ${formatTime(stallAt)}, skipping ahead ${JUMPS[jumps]}s`);
-				await DiscordUtils.sendInfo(now.message, 'Damaged spot',
-					`\`${item.title}\` can't be read around ${formatTime(stallAt)} (drive problem), skipping ahead ${JUMPS[jumps]}s. This file may need re-downloading.`
-				).catch(() => {});
+				// (log only: the line above is the record of damaged files)
 			}
 			logger.warn(`Source stalled, reopening ${item.title} at ${formatTime(position)} (attempt ${count})`);
 			this.keepTempFile = now.tempFile;
@@ -421,7 +418,8 @@ export class StreamingService {
 		const position = Math.max(0, now.offset + (Date.now() - now.startedAt) / 1000);
 		this.paused = { item, position, at: Date.now() };
 		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(`⏸ ${item.title}`));
-		await DiscordUtils.sendInfo(message, 'Paused', `\`${item.title}\` at ${formatTime(position)}. Use \`${config.prefix}pause\` again to continue.`);
+		logger.info(`Paused ${item.title} at ${formatTime(position)}`);
+		await Feedback.react(message, '⏸️');
 	}
 
 	public async resume(message: Message): Promise<void> {
@@ -435,7 +433,8 @@ export class StreamingService {
 		this.paused = null;
 		PauseGate.resume();
 		this.streamer.client.user?.setActivity(DiscordUtils.status_watch(p.item.title));
-		await DiscordUtils.sendInfo(message, 'Resumed', `\`${p.item.title}\` from ${formatTime(p.position)}`);
+		logger.info(`Resumed ${p.item.title} from ${formatTime(p.position)}`);
+		await Feedback.react(message, '▶️');
 	}
 
 	/** Drop the pause (on stop, skip, channel change or when the video ends) and release held frames */
@@ -463,40 +462,40 @@ export class StreamingService {
 		logger.info(`Marked video as failed: ${videoSource}`);
 	}
 
+	/** Queue a video. Says nothing in chat (the command decides); returns the queued item, or null */
 	public async addToQueue(
 		message: Message,
 		videoSource: string,
 		title?: string,
 		headers?: Record<string, string>
-	): Promise<boolean> {
+	): Promise<QueueItem | null> {
 		try {
 			const username = message.author.username;
 			const mediaSource = await this.mediaService.resolveMediaSource(videoSource, headers);
-
 			if (mediaSource) {
-				const queueItem = await this.queueService.addToQueue(mediaSource, username);
-				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
-				return true;
-			} else {
-				// Fallback for unresolved sources
-				const queueItem = await this.queueService.add(
-					videoSource,
-					title || videoSource,
-					username,
-					'url',
-					false,
-					videoSource,
-					headers
-				);
-				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
-				return true;
+				return await this.queueService.addToQueue(mediaSource, username);
 			}
+			// Fallback for unresolved sources
+			return await this.queueService.add(videoSource, title || videoSource, username, 'url', false, videoSource, headers);
 		} catch (error) {
 			await ErrorUtils.handleError(error, `adding to queue: ${videoSource}`, message);
-			return false;
+			return null;
 		}
 	}
 
+	/** Is something on screen right now (playing or paused)? */
+	public isBusy(): boolean {
+		return this.playbackActive || this.streamStatus.playing || this.paused !== null;
+	}
+
+	/** How many videos are ahead of this one in the queue (1 = plays next) */
+	public queuePosition(itemId: string): number {
+		const items = this.queueService.getQueue();
+		const current = this.queueService.getCurrent();
+		const idx = items.findIndex(i => i.id === itemId);
+		const cur = current ? items.findIndex(i => i.id === current.id) : -1;
+		return idx - cur;
+	}
 
 	public async playFromQueue(message: Message): Promise<void> {
 		if (this.streamStatus.playing) {
@@ -519,7 +518,7 @@ export class StreamingService {
 		await this.playVideoFromQueueItem(message, nextItem);
 	}
 
-	public async skipCurrent(message: Message): Promise<void> {
+	public async skipCurrent(message: Message, opts: { silent?: boolean } = {}): Promise<void> {
 		this.clearPaused();
 
 		if (!this.streamStatus.playing) {
@@ -552,18 +551,25 @@ export class StreamingService {
 
 			if (!nextItem) {
 				// No more items in queue - stop playback and leave voice channel
-				await DiscordUtils.sendInfo(message, 'Queue', 'No more videos in queue.');
+				if (!opts.silent) {
+					await Feedback.react(message, '⏭️');
+					await message.channel.send(`⏭️ **Skipped** \`${currentItem?.title ?? 'video'}\`. Nothing left to play.`).catch(() => {});
+				}
 				this.queueService.setPlaying(false);
 				await this.cleanupStreamStatus();
 				return;
 			}
 
 			const currentTitle = currentItem ? currentItem.title : 'current video';
-			await DiscordUtils.sendInfo(message, 'Skipping', `Skipping \`${currentTitle}\`. Playing next: \`${nextItem.title}\``);
+			if (!opts.silent) {
+				await Feedback.react(message, '⏭️');
+				await message.channel.send(`⏭️ **Skipping** \`${currentTitle}\`. Playing next: \`${nextItem.title}\``).catch(() => {});
+			}
 
 			this.streamStatus.manualStop = false;
 
-			await this.playVideoFromQueueItem(message, nextItem);
+			// Don't hold the command until the whole next video has played
+			this.playVideoFromQueueItem(message, nextItem).catch(err => ErrorUtils.handleError(err, 'playing after skip'));
 		} finally {
 			this.isSkipping = false;
 		}
@@ -707,10 +713,7 @@ export class StreamingService {
 			.catch((err) => {
 				if (this.controller && !this.controller.signal.aborted) {
 					logger.error('playStream error:', err);
-					// Send error message to user
-					DiscordUtils.sendError(message, `Stream error: ${err.message || 'Unknown error'}`).catch(e =>
-						logger.error('Failed to send error message:', e)
-					);
+					// (log only: the channel or queue moves on by itself)
 				}
 				if (this.controller && !this.controller.signal.aborted) this.controller.abort();
 			});
@@ -726,9 +729,6 @@ export class StreamingService {
 	}
 
 	private async handleQueueAdvancement(message: Message): Promise<void> {
-		if (!this.channelService.isActive()) {
-			await DiscordUtils.sendFinishMessage(message);
-		}
 
 		// The video finished playing, so remove it from the queue
 		const finishedItem = this.queueService.getCurrent();
@@ -761,31 +761,19 @@ export class StreamingService {
 	}
 
 	private async handleDownload(message: Message, videoSource: string, title?: string): Promise<string | null> {
-		const downloadMessage = await message.reply(`📥 Downloading \`${title || 'YouTube video'}\`...`).catch(e => {
-			logger.warn("Failed to send 'Downloading...' message:", e);
-			return null;
-		});
-
 		try {
 			logger.info(`Downloading ${title || videoSource}...`);
 			const tempFilePath = await this.mediaService.downloadYouTubeVideo(videoSource);
 
 			if (tempFilePath) {
 				logger.info(`Finished downloading ${title || videoSource}`);
-				if (downloadMessage) {
-					await downloadMessage.delete().catch(e => logger.warn("Failed to delete 'Downloading...' message:", e));
-				}
 				return tempFilePath;
 			}
 			throw new Error('Download failed, no temp file path returned.');
 		} catch (error) {
 			logger.error(`Failed to download YouTube video: ${videoSource}`, error);
-			const errorMessage = `❌ Failed to download \`${title || 'YouTube video'}\`.`;
-			if (downloadMessage) {
-				await downloadMessage.edit(errorMessage).catch(e => logger.warn("Failed to edit 'Downloading...' message:", e));
-			} else {
-				await DiscordUtils.sendError(message, `Failed to download video: ${error instanceof Error ? error.message : String(error)}`);
-			}
+			await Feedback.failed(message);
+			await DiscordUtils.sendError(message, `Couldn't download \`${title || 'that video'}\`.`);
 			return null;
 		}
 	}
@@ -909,12 +897,8 @@ export class StreamingService {
 			const offset = resume?.position ?? 0;
 
 			await this.ensureVoiceConnection(guildId, channelId, title);
-			if (resume?.reason === 'recover') {
-				await DiscordUtils.sendInfo(message, 'Reconnected', `Picked \`${title || videoSource}\` back up at ${formatTime(offset)}`).catch(() => {});
-			} else if (resume) {
-				await DiscordUtils.sendInfo(message, 'Resumed', `\`${title || videoSource}\` from ${formatTime(offset)}`);
-			} else {
-				await DiscordUtils.sendPlaying(message, title || videoSource);
+			if (!resume) {
+				await Feedback.started(message);
 			}
 
 			const inputOptions = [
@@ -926,6 +910,7 @@ export class StreamingService {
 			await this.executeStreamWorkflow(inputForFfmpeg, streamOpts, message, title || videoSource, videoSource);
 		} catch (error) {
 			await ErrorUtils.handleError(error, `playing video: ${title || videoSource}`);
+			await Feedback.failed(message);
 			if (this.controller && !this.controller.signal.aborted) this.controller.abort();
 			this.markVideoAsFailed(videoSource);
 		} finally {

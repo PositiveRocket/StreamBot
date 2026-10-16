@@ -1,4 +1,5 @@
 import { BaseCommand } from "./base.js";
+import { Feedback } from "../utils/shared.js";
 import { CommandContext } from "../types/index.js";
 import logger from '../utils/logger.js';
 
@@ -17,7 +18,7 @@ export default class StopCommand extends BaseCommand {
 		try {
 			context.streamStatus.manualStop = true;
 
-			await this.sendSuccess(context.message, 'Stopped playing video and cleared queue.');
+			await Feedback.react(context.message, '⏹️');
 			logger.info("Stopped playing video and cleared queue.");
 
 			// Use streaming service to handle the stop and clear queue

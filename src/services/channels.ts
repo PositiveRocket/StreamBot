@@ -305,7 +305,10 @@ export class ChannelService {
 		const isSeasonFolder = (d: string) => /^(season|series|s)\s*\d+$|^specials$|^extras$/i.test(d.trim());
 		const show = [...file.dirs].reverse().find(d => !isSeasonFolder(d))
 			|| (file.dirs.length === 0 ? '' : channelName);
-		if (!show || file.name.toLowerCase().includes(show.toLowerCase().replace(/\s*\(\d{4}\)$/, ''))) {
+		// Compare letters and digits only, so "FamilyGuy" matches "Family Guy - 607" and "The Simpsons (1989)"
+		// matches "The Simpsons - S01E01": don't put the show name in front twice
+		const squash = (t: string) => t.toLowerCase().replace(/\(\d{4}\)/g, '').replace(/[^a-z0-9]/g, '');
+		if (!show || squash(file.name).includes(squash(show))) {
 			return file.name;
 		}
 		return `${show} - ${file.name}`;
