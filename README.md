@@ -213,6 +213,7 @@ Videos are shuffled with no repeats until the whole folder has played (set `CHAN
 | `channel` | Show the channel guide | `ch`, `tv` |
 | `channel <name\|number>` | Switch to a channel right away | |
 | `channel up` / `channel down` | Flip to the next/previous channel | |
+| `channel shuffle` | Reshuffle the current channel (the new order starts after the current video) | |
 | `channel off` | Stop the channel after the current video | |
 
 Episode changes, skips and channel flips keep the same screen share open, so viewers don't see the stream stop and restart (set `SEAMLESS_TRANSITIONS="false"` to turn this off).

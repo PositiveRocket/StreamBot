@@ -6,7 +6,7 @@ import config from "../config.js";
 export default class ChannelCommand extends BaseCommand {
 	name = "channel";
 	description = "Tune into a TV channel (a folder that plays on loop), flip channels, or turn channel mode off";
-	usage = "channel [name|number|up|down|off]";
+	usage = "channel [name|number|up|down|shuffle|off]";
 	aliases = ["ch", "tv"];
 
 	async execute(context: CommandContext): Promise<void> {
@@ -18,6 +18,25 @@ export default class ChannelCommand extends BaseCommand {
 		// No argument: show the channel guide
 		if (!arg || lower === 'list' || lower === 'guide') {
 			await this.showGuide(context);
+			return;
+		}
+
+		if (lower === 'shuffle' || lower === 'reshuffle') {
+			let result;
+			try {
+				result = await channels.reshuffle();
+			} catch (error) {
+				await this.sendError(context.message, error instanceof Error ? error.message : String(error));
+				return;
+			}
+			if (!result) {
+				await this.sendError(context.message, `No channel is on. Tune in first with \`${config.prefix}ch <name or number>\`.`);
+			} else if (result.count === 0) {
+				await this.sendError(context.message, `Channel \`${channels.getCurrent()}\` has no videos in it.`);
+			} else {
+				const next = result.next ? ` Up next: \`${result.next}\`` : '';
+				await Feedback.reply(context.message, `🔀 Reshuffled **${channels.getCurrent()}** (${result.count} episodes).${next}`);
+			}
 			return;
 		}
 
@@ -85,7 +104,7 @@ export default class ChannelCommand extends BaseCommand {
 		});
 		const p = config.prefix;
 		const footer = current
-			? `Watching **${current}**. \`${p}ch up\` / \`${p}ch down\` to flip, \`${p}ch off\` to stop after this video.`
+			? `Watching **${current}**. \`${p}ch up\` / \`${p}ch down\` to flip, \`${p}ch shuffle\` to reshuffle, \`${p}ch off\` to stop after this video.`
 			: `\`${p}ch <name or number>\` to tune in.`;
 
 		await context.message.channel.send(`📺 **Channel Guide**\n${lines.join('\n')}\n\n${footer}`);

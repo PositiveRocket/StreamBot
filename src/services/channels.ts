@@ -266,6 +266,23 @@ export class ChannelService {
 		this.current = null;
 	}
 
+	/**
+	 * Throw away the current order and shuffle the tuned-in channel again (re-reading the
+	 * folder, so new episodes are included). Whatever is playing now keeps playing; the
+	 * new order starts with the next episode. Returns null if no channel is on.
+	 */
+	public async reshuffle(): Promise<{ count: number; next: string | null } | null> {
+		const name = this.current;
+		if (!name) return null;
+		const folder = (await this.channelFolders()).find(f => f.name === name);
+		if (!folder) return null;
+		this.listingCache.delete(name);
+		const playlist = this.buildPlaylist(name, await this.channelFiles(name, folder.location), true);
+		this.playlists.set(name, playlist);
+		logger.info(`Reshuffled channel ${name} (${playlist.length} episodes)`);
+		return { count: playlist.length, next: playlist[0] ? this.displayTitle(playlist[0], name) : null };
+	}
+
 	/** Next file to play on the current channel, or null if it is empty / off / unreachable */
 	public async nextFile(): Promise<{ path: string; title: string } | null> {
 		const name = this.current;
@@ -314,9 +331,9 @@ export class ChannelService {
 		return `${show} - ${file.name}`;
 	}
 
-	private buildPlaylist(channelName: string, filesIn: ChannelFile[]): ChannelFile[] {
+	private buildPlaylist(channelName: string, filesIn: ChannelFile[], forceShuffle = false): ChannelFile[] {
 		const files = [...filesIn];
-		if (!config.channelShuffle) {
+		if (!config.channelShuffle && !forceShuffle) {
 			// Play in order (natural sort, so "Ep 2" comes before "Ep 10")
 			const key = (f: ChannelFile) => [...f.dirs, f.name].join('/');
 			return files.sort((a, b) => key(a).localeCompare(key(b), undefined, { numeric: true }));
