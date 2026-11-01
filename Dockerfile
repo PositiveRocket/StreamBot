@@ -9,9 +9,9 @@ RUN apt-get update && apt-get install -y curl ca-certificates unzip && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install bun and add to PATH
+# Install bun and add to PATH (pinned, so a new bun release can't change how the build behaves)
 ENV BUN_INSTALL="/usr/local/"
-RUN curl -fsSL https://bun.sh/install | bash
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
 
 # Install remaining dependencies and clean cache
 RUN apt-get update && apt-get install -y \
@@ -27,8 +27,11 @@ COPY package.json bun.lock ./
 # Install dependencies (frozen: newer, untested versions of the voice libraries can break joining voice)
 RUN bun install --frozen-lockfile
 
-# Trust all packages
-RUN bun pm trust --all
+# The install above already runs the setup scripts of everything in package.json's
+# "trustedDependencies" (bun 1.4.4+ reads that list from package.json), so there is no
+# separate "bun pm trust" step anymore: on bun 1.4.4 it fails with "0 scripts ran".
+# Instead, check that the native modules the web login needs actually load.
+RUN bun -e "require('bcrypt'); require('argon2'); console.log('native modules OK')"
 
 # Copy the rest of the application code
 COPY . .
